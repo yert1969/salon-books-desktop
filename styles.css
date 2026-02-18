@@ -218,6 +218,9 @@ body {
   transition: all 0.2s;
   font-family: var(--font-body);
   text-align: left;
+  position: relative;
+  z-index: 10;
+  pointer-events: auto;
 }
 
 .nav-btn:hover {
@@ -537,4 +540,107 @@ body {
 
 .quick-entry-grid button {
   height: 42px;
+}
+
+/* ============================================================
+   REPORT TABS
+   ============================================================ */
+
+.report-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 8px;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-light);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: var(--font-body);
+  border-bottom: 3px solid transparent;
+}
+
+.tab-btn:hover {
+  color: var(--plum);
+  background: var(--cream);
+  border-radius: 4px 4px 0 0;
+}
+
+.tab-btn.active {
+  color: var(--plum);
+  font-weight: 600;
+  border-bottom-color: var(--plum);
+}
+
+/* ============================================================
+   CATEGORY TAGS (Settings)
+   ============================================================ */
+
+.category-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--cream);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.category-remove {
+  background: none;
+  border: none;
+  color: var(--danger);
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: transform 0.1s;
+}
+
+.category-remove:hover {
+  transform: scale(1.2);
+}
+
+/* ============================================================
+   REPORT CONTROLS
+   ============================================================ */
+
+#report-content {
+  padding: 20px 0;
+}
+
+/* ============================================================
+   RESPONSIVE ADJUSTMENTS
+   ============================================================ */
+
+@media (max-width: 1024px) {
+  .main-container {
+    flex-direction: column;
+  }
+  
+  .sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 16px;
+  }
+  
+  .nav {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  
+  .quick-entry-grid {
+    grid-template-columns: 1fr;
+  }
 }
