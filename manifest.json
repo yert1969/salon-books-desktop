@@ -1,0 +1,21 @@
+{
+  "name": "Mane Frame Salon — Desktop",
+  "short_name": "Mane Frame",
+  "description": "Salon management desktop application",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FDFBF7",
+  "theme_color": "#6B1A2A",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
