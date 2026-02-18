@@ -912,7 +912,25 @@ async function renderWeeklyReport(el) {
         responsive: true,
         maintainAspectRatio: true,
         scales: {
-          y: { beginAtZero: true }
+          y: { 
+            beginAtZero: true,
+            ticks: {
+              callback: function(value) {
+                return '$' + value.toFixed(0);
+              }
+            }
+          }
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.dataset.label || '';
+                const value = context.parsed.y || 0;
+                return `${label}: $${value.toFixed(2)}`;
+              }
+            }
+          }
         }
       }
     });
@@ -996,10 +1014,12 @@ async function renderMonthlyReport(el) {
         <div>
           <h4 style="margin-bottom:12px;">Income by Category</h4>
           <canvas id="income-pie-chart" style="max-height:300px;"></canvas>
+          <div id="income-summary" style="margin-top:16px;"></div>
         </div>
         <div>
           <h4 style="margin-bottom:12px;">Expenses by Category</h4>
           <canvas id="expense-pie-chart" style="max-height:300px;"></canvas>
+          <div id="expense-summary" style="margin-top:16px;"></div>
         </div>
       </div>
     </div>
@@ -1008,39 +1028,143 @@ async function renderMonthlyReport(el) {
   // Income Pie Chart
   const incomeCtx = document.getElementById('income-pie-chart');
   if (incomeCtx && window.Chart && Object.keys(incomeByCategory).length > 0) {
+    const incomeColors = [
+      '#2D7A4C', '#4A90E2', '#F5A623', '#7B68EE', '#50C878', '#FF6B6B',
+      '#4ECDC4', '#FFD93D', '#C44569', '#6C5CE7', '#FD79A8', '#A29BFE'
+    ];
+    
     new Chart(incomeCtx, {
       type: 'pie',
       data: {
         labels: Object.keys(incomeByCategory),
         datasets: [{
           data: Object.values(incomeByCategory),
-          backgroundColor: ['#2D7A4C', '#4CAF50', '#66BB6A', '#81C784', '#A5D6A7', '#C8E6C9', '#E8F5E9']
+          backgroundColor: incomeColors
         }]
       },
       options: {
         responsive: true,
-        maintainAspectRatio: true
+        maintainAspectRatio: true,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.label || '';
+                const value = context.parsed || 0;
+                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                return `${label}: $${value.toFixed(2)} (${percentage}%)`;
+              }
+            }
+          }
+        }
       }
     });
+    
+    // Generate income summary table
+    const incomeTotal = Object.values(incomeByCategory).reduce((a, b) => a + b, 0);
+    const incomeSummary = document.getElementById('income-summary');
+    if (incomeSummary) {
+      const sortedIncome = Object.entries(incomeByCategory).sort((a, b) => b[1] - a[1]);
+      incomeSummary.innerHTML = `
+        <table style="width:100%; font-size:13px; border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border); text-align:left;">
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted);">Category</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">Amount</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sortedIncome.map(([category, amount], index) => {
+              const percentage = incomeTotal > 0 ? ((amount / incomeTotal) * 100).toFixed(1) : 0;
+              const color = incomeColors[index % incomeColors.length];
+              return `
+                <tr style="border-bottom:1px solid var(--border);">
+                  <td style="padding:8px 4px;">
+                    <span style="display:inline-block; width:12px; height:12px; background:${color}; border-radius:2px; margin-right:8px; vertical-align:middle;"></span>
+                    ${category}
+                  </td>
+                  <td style="padding:8px 4px; text-align:right; font-weight:600; color:var(--success);">${fmt(amount)}</td>
+                  <td style="padding:8px 4px; text-align:right; color:var(--text-muted);">${percentage}%</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
   }
   
   // Expense Pie Chart
   const expenseCtx = document.getElementById('expense-pie-chart');
   if (expenseCtx && window.Chart && Object.keys(expenseByCategory).length > 0) {
+    const expenseColors = [
+      '#E74C3C', '#3498DB', '#F39C12', '#9B59B6', '#1ABC9C', '#E67E22',
+      '#34495E', '#16A085', '#D35400', '#8E44AD', '#27AE60', '#2980B9'
+    ];
+    
     new Chart(expenseCtx, {
       type: 'pie',
       data: {
         labels: Object.keys(expenseByCategory),
         datasets: [{
           data: Object.values(expenseByCategory),
-          backgroundColor: ['#C13838', '#D32F2F', '#E57373', '#EF9A9A', '#FFCDD2', '#FFEBEE']
+          backgroundColor: expenseColors
         }]
       },
       options: {
         responsive: true,
-        maintainAspectRatio: true
+        maintainAspectRatio: true,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.label || '';
+                const value = context.parsed || 0;
+                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                return `${label}: $${value.toFixed(2)} (${percentage}%)`;
+              }
+            }
+          }
+        }
       }
     });
+    
+    // Generate expense summary table
+    const expenseTotal = Object.values(expenseByCategory).reduce((a, b) => a + b, 0);
+    const expenseSummary = document.getElementById('expense-summary');
+    if (expenseSummary) {
+      const sortedExpense = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1]);
+      expenseSummary.innerHTML = `
+        <table style="width:100%; font-size:13px; border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border); text-align:left;">
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted);">Category</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">Amount</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sortedExpense.map(([category, amount], index) => {
+              const percentage = expenseTotal > 0 ? ((amount / expenseTotal) * 100).toFixed(1) : 0;
+              const color = expenseColors[index % expenseColors.length];
+              return `
+                <tr style="border-bottom:1px solid var(--border);">
+                  <td style="padding:8px 4px;">
+                    <span style="display:inline-block; width:12px; height:12px; background:${color}; border-radius:2px; margin-right:8px; vertical-align:middle;"></span>
+                    ${category}
+                  </td>
+                  <td style="padding:8px 4px; text-align:right; font-weight:600; color:var(--danger);">${fmt(amount)}</td>
+                  <td style="padding:8px 4px; text-align:right; color:var(--text-muted);">${percentage}%</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
   }
 }
 
