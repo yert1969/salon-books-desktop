@@ -16,10 +16,8 @@ firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const firestore = firebase.firestore();
 
-// Enable offline persistence
-firestore.enablePersistence().catch(err => {
-  console.log('Offline persistence error:', err);
-});
+// Note: Offline persistence disabled for desktop to avoid multi-tab conflicts
+// Data still syncs from Firestore in real-time
 
 // IndexedDB (Dexie) for local cache
 const db = new Dexie('ManeFrameDesktop');
@@ -89,6 +87,8 @@ function closeModal() {
 // ============================================================
 
 auth.onAuthStateChanged(async user => {
+  console.log('Auth state changed:', user ? user.email : 'signed out');
+  
   if (user) {
     currentUser = user;
     document.getElementById('login-screen').classList.add('hidden');
@@ -101,9 +101,13 @@ auth.onAuthStateChanged(async user => {
       day: 'numeric' 
     });
     
+    console.log('Syncing data from Firestore...');
     await syncFromFirestore();
+    console.log('Loading categories...');
     await loadCategories();
+    console.log('Navigating to daily view...');
     navigate('daily');
+    console.log('App ready!');
   } else {
     currentUser = null;
     document.getElementById('login-screen').classList.remove('hidden');
@@ -133,22 +137,30 @@ async function syncFromFirestore() {
   
   const uid = currentUser.uid;
   
-  // Sync transactions
-  const txnSnapshot = await firestore.collection('users').doc(uid).collection('transactions').get();
-  for (const doc of txnSnapshot.docs) {
-    await db.transactions.put({ id: doc.id, userId: uid, ...doc.data() });
-  }
-  
-  // Sync monthly expenses
-  const expSnapshot = await firestore.collection('users').doc(uid).collection('monthlyExpenses').get();
-  for (const doc of expSnapshot.docs) {
-    await db.monthlyExpenses.put({ id: doc.id, userId: uid, ...doc.data() });
-  }
-  
-  // Sync renters
-  const renterSnapshot = await firestore.collection('users').doc(uid).collection('renters').get();
-  for (const doc of renterSnapshot.docs) {
-    await db.renters.put({ id: doc.id, userId: uid, ...doc.data() });
+  try {
+    // Sync transactions
+    const txnSnapshot = await firestore.collection('users').doc(uid).collection('transactions').get();
+    for (const doc of txnSnapshot.docs) {
+      await db.transactions.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${txnSnapshot.docs.length} transactions`);
+    
+    // Sync monthly expenses
+    const expSnapshot = await firestore.collection('users').doc(uid).collection('monthlyExpenses').get();
+    for (const doc of expSnapshot.docs) {
+      await db.monthlyExpenses.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${expSnapshot.docs.length} monthly expenses`);
+    
+    // Sync renters
+    const renterSnapshot = await firestore.collection('users').doc(uid).collection('renters').get();
+    for (const doc of renterSnapshot.docs) {
+      await db.renters.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${renterSnapshot.docs.length} renters`);
+  } catch (err) {
+    console.error('Error syncing from Firestore:', err);
+    // Continue anyway - we can still use the app
   }
 }
 
@@ -179,6 +191,7 @@ async function loadCategories() {
 // ============================================================
 
 function navigate(view) {
+  console.log('Navigating to:', view);
   state.currentView = view;
   
   // Update nav buttons
@@ -188,12 +201,24 @@ function navigate(view) {
   document.querySelector(`[data-view="${view}"]`).classList.add('active');
   
   // Render view
-  switch(view) {
-    case 'daily': renderDailyView(); break;
-    case 'monthly': renderMonthlyView(); break;
-    case 'renters': renderRentersView(); break;
-    case 'reports': renderReportsView(); break;
-    case 'settings': renderSettingsView(); break;
+  try {
+    switch(view) {
+      case 'daily': renderDailyView(); break;
+      case 'monthly': renderMonthlyView(); break;
+      case 'renters': renderRentersView(); break;
+      case 'reports': renderReportsView(); break;
+      case 'settings': renderSettingsView(); break;
+    }
+    console.log('View rendered successfully');
+  } catch (err) {
+    console.error('Error rendering view:', err);
+    document.getElementById('content').innerHTML = `
+      <div class="card" style="text-align:center; padding:40px;">
+        <h2 style="color:var(--danger);">Error Loading View</h2>
+        <p>${err.message}</p>
+        <button class="btn-primary" onclick="location.reload()">Reload App</button>
+      </div>
+    `;
   }
 }
 
