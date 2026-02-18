@@ -37,7 +37,11 @@ let state = {
   selectedDate: todayStr(),
   selectedMonth: new Date().getMonth() + 1,
   selectedYear: new Date().getFullYear(),
-  categories: {}
+  categories: {
+    INCOME: ['Haircut', 'Color', 'Highlights', 'Perm', 'Extensions', 'Treatment', 'Blowout', 'Styling', 'Other'],
+    DAILY_EXPENSE: ['Products', 'Supplies', 'Lunch', 'Gas', 'Parking', 'Other'],
+    MONTHLY_EXPENSE: ['Booth Rent', 'Insurance', 'License Renewal', 'Marketing', 'Equipment', 'Other']
+  }
 };
 
 // ============================================================
@@ -151,16 +155,22 @@ async function syncFromFirestore() {
 async function loadCategories() {
   if (!currentUser) return;
   
-  const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
-  if (doc.exists) {
-    state.categories = doc.data();
-  } else {
-    // Default categories
-    state.categories = {
-      INCOME: ['Haircut', 'Color', 'Highlights', 'Perm', 'Extensions', 'Treatment', 'Blowout', 'Styling', 'Other'],
-      DAILY_EXPENSE: ['Products', 'Supplies', 'Lunch', 'Gas', 'Parking', 'Other'],
-      MONTHLY_EXPENSE: ['Booth Rent', 'Insurance', 'License Renewal', 'Marketing', 'Equipment', 'Other']
-    };
+  try {
+    const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
+    if (doc.exists) {
+      const firestoreCategories = doc.data();
+      // Merge with defaults to ensure all keys exist
+      state.categories = {
+        INCOME: firestoreCategories.INCOME || state.categories.INCOME,
+        DAILY_EXPENSE: firestoreCategories.DAILY_EXPENSE || state.categories.DAILY_EXPENSE,
+        MONTHLY_EXPENSE: firestoreCategories.MONTHLY_EXPENSE || state.categories.MONTHLY_EXPENSE
+      };
+    }
+    // If doc doesn't exist, we keep the defaults that were set in state initialization
+    console.log('Categories loaded:', state.categories);
+  } catch (err) {
+    console.error('Error loading categories:', err);
+    // Keep default categories on error
   }
 }
 
@@ -295,6 +305,12 @@ function updateQuickForm() {
   const type = document.getElementById('quick-type').value;
   const categorySelect = document.getElementById('quick-category');
   const paymentGroup = document.getElementById('quick-payment-group');
+  
+  // Safety check - make sure categories exist
+  if (!state.categories || !state.categories.INCOME || !state.categories.DAILY_EXPENSE) {
+    console.error('Categories not loaded yet');
+    return;
+  }
   
   const categories = type === 'INCOME' ? state.categories.INCOME : state.categories.DAILY_EXPENSE;
   categorySelect.innerHTML = categories.map(c => `<option value="${c}">${c}</option>`).join('');
