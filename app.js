@@ -465,6 +465,10 @@ async function openEditTransactionModal(id) {
     <h2 class="modal-title">Edit Transaction</h2>
     <form onsubmit="saveEditTransaction('${id}'); return false;">
       <div class="form-group">
+        <label class="form-label">Date</label>
+        <input type="date" id="edit-date" class="form-input" value="${t.date}" required>
+      </div>
+      <div class="form-group">
         <label class="form-label">Category</label>
         <select id="edit-category" class="form-select" required>${catOptions}</select>
       </div>
@@ -509,10 +513,11 @@ async function saveEditTransaction(id) {
   if (!t) return;
   
   const isIncome = t.type === 'INCOME';
+  const date = document.getElementById('edit-date').value;
   const category = document.getElementById('edit-category').value;
   const notes = document.getElementById('edit-notes').value;
   
-  const updates = { category, notes };
+  const updates = { date, category, notes };
   
   if (isIncome) {
     updates.serviceAmount = parseFloat(document.getElementById('edit-service').value) || 0;
