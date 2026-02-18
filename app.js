@@ -156,7 +156,7 @@ auth.onAuthStateChanged(async user => {
     console.log('Loading categories...');
     await loadCategories();
     console.log('Rendering daily view...');
-    navigate('daily');
+    await navigate('daily');
     console.log('App ready!');
   } else {
     currentUser = null;
@@ -246,7 +246,7 @@ async function saveCategories() {
 // NAVIGATION
 // ============================================================
 
-function navigate(view) {
+async function navigate(view) {
   console.log('Navigating to:', view);
   state.currentView = view;
   
@@ -258,19 +258,20 @@ function navigate(view) {
   
   try {
     switch(view) {
-      case 'daily': renderDailyView(); break;
-      case 'monthly': renderMonthlyView(); break;
-      case 'renters': renderRentersView(); break;
-      case 'reports': renderReportsView(); break;
-      case 'settings': renderSettingsView(); break;
+      case 'daily': await renderDailyView(); break;
+      case 'monthly': await renderMonthlyView(); break;
+      case 'renters': await renderRentersView(); break;
+      case 'reports': await renderReportsView(); break;
+      case 'settings': await renderSettingsView(); break;
     }
-    console.log('View rendered');
+    console.log('View rendered:', view);
   } catch (err) {
     console.error('Render error:', err);
     document.getElementById('content').innerHTML = `
       <div class="card" style="text-align:center; padding:40px;">
-        <h2 style="color:var(--danger);">Error</h2>
+        <h2 style="color:var(--danger);">Error Loading View</h2>
         <p>${err.message}</p>
+        <p style="color:var(--text-muted);font-size:12px;">${err.stack}</p>
         <button class="btn-primary" onclick="location.reload()">Reload</button>
       </div>
     `;
@@ -558,16 +559,23 @@ async function deleteTransaction(id) {
 async function renderMonthlyView() {
   const content = document.getElementById('content');
   
-  const expenses = await db.monthlyExpenses
-    .where('year').equals(state.selectedYear)
-    .where('month').equals(state.selectedMonth)
-    .toArray();
-  
-  const total = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
-  
-  const monthDisplay = `${monthName(state.selectedMonth)} ${state.selectedYear}`;
-  
-  content.innerHTML = `
+  try {
+    console.log('Rendering monthly view:', state.selectedMonth, state.selectedYear);
+    
+    // Get all expenses and filter in JavaScript (Dexie doesn't support multiple where clauses)
+    const allExpenses = await db.monthlyExpenses.toArray();
+    const expenses = allExpenses.filter(e => 
+      e.year === state.selectedYear && 
+      e.month === state.selectedMonth
+    );
+    
+    console.log('Loaded expenses:', expenses.length);
+    
+    const total = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    
+    const monthDisplay = `${monthName(state.selectedMonth)} ${state.selectedYear}`;
+    
+    content.innerHTML = `
     <div class="page-header">
       <h2 class="page-title">Monthly Expenses</h2>
       <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
@@ -640,6 +648,16 @@ async function renderMonthlyView() {
       `}
     </div>
   `;
+  } catch (err) {
+    console.error('Error rendering monthly view:', err);
+    content.innerHTML = `
+      <div class="card" style="text-align:center; padding:40px;">
+        <h2 style="color:var(--danger);">Error Loading Monthly View</h2>
+        <p>${err.message}</p>
+        <button class="btn-primary" onclick="navigate('daily')">Go to Daily</button>
+      </div>
+    `;
+  }
 }
 
 function changeMonth(delta) {
