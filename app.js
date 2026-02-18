@@ -91,8 +91,17 @@ auth.onAuthStateChanged(async user => {
   
   if (user) {
     currentUser = user;
-    document.getElementById('login-screen').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
+    
+    // Force hide login screen
+    const loginScreen = document.getElementById('login-screen');
+    const appScreen = document.getElementById('app');
+    
+    loginScreen.classList.add('hidden');
+    loginScreen.style.display = 'none'; // Force it
+    
+    appScreen.classList.remove('hidden');
+    appScreen.style.display = 'block'; // Force it
+    
     document.getElementById('user-email').textContent = user.email;
     document.getElementById('header-date').textContent = new Date().toLocaleDateString('en-US', { 
       weekday: 'short', 
@@ -101,6 +110,7 @@ auth.onAuthStateChanged(async user => {
       day: 'numeric' 
     });
     
+    console.log('Login screen hidden, app shown');
     console.log('Syncing data from Firestore...');
     await syncFromFirestore();
     console.log('Loading categories...');
@@ -111,7 +121,9 @@ auth.onAuthStateChanged(async user => {
   } else {
     currentUser = null;
     document.getElementById('login-screen').classList.remove('hidden');
+    document.getElementById('login-screen').style.display = 'block';
     document.getElementById('app').classList.add('hidden');
+    document.getElementById('app').style.display = 'none';
   }
 });
 
