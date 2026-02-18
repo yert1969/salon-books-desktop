@@ -933,11 +933,12 @@ async function renderMonthlyReport(el) {
   const totalExpense = expenses.reduce((s, t) => s + (t.amount||0), 0);
   const totalNet = totalIncome - totalExpense;
   
-  // Monthly expenses
-  const monthlyExpenses = await db.monthlyExpenses
-    .where('year').equals(state.selectedYear)
-    .where('month').equals(state.selectedMonth)
-    .toArray();
+  // Monthly expenses - Get all and filter (Dexie doesn't support chaining where clauses)
+  const allMonthlyExpenses = await db.monthlyExpenses.toArray();
+  const monthlyExpenses = allMonthlyExpenses.filter(e => 
+    e.year === state.selectedYear && 
+    e.month === state.selectedMonth
+  );
   const monthlyExpenseTotal = monthlyExpenses.reduce((s, e) => s + (e.amount||0), 0);
   
   const netAfterMonthly = totalNet - monthlyExpenseTotal;
