@@ -644,6 +644,74 @@ async function renderMonthlyView() {
     
     const monthDisplay = `${monthName(state.selectedMonth)} ${state.selectedYear}`;
     
+    // Check if viewing current month
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+    const isCurrentMonth = (state.selectedMonth === currentMonth && state.selectedYear === currentYear);
+    
+    // Calculate comparison stats (only for current month)
+    let comparisonHTML = '';
+    if (isCurrentMonth) {
+      // Last month
+      let lastMonth = currentMonth - 1;
+      let lastMonthYear = currentYear;
+      if (lastMonth < 1) { lastMonth = 12; lastMonthYear--; }
+      
+      const lastMonthExpenses = allExpenses.filter(e => 
+        e.year === lastMonthYear && e.month === lastMonth
+      );
+      const lastMonthTotal = lastMonthExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+      
+      // Same month last year
+      const lastYearMonth = currentMonth;
+      const lastYear = currentYear - 1;
+      
+      const lastYearExpenses = allExpenses.filter(e => 
+        e.year === lastYear && e.month === lastYearMonth
+      );
+      const lastYearTotal = lastYearExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+      
+      // Calculate percentage changes
+      const calcChange = (current, previous) => {
+        if (previous === 0) return current > 0 ? 100 : 0;
+        return ((current - previous) / previous) * 100;
+      };
+      
+      const vsLastMonth = calcChange(total, lastMonthTotal);
+      const vsLastYear = calcChange(total, lastYearTotal);
+      
+      const formatChange = (change, prevAmount) => {
+        if (prevAmount === 0 && change === 0) {
+          return '<span style="color:var(--text-muted); font-size:14px;">No data</span>';
+        }
+        const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
+        // Note: For expenses, higher is worse, but we'll keep consistent coloring
+        const color = change > 0 ? '#C13838' : change < 0 ? '#2D7A4C' : '#999';
+        const percent = Math.abs(change).toFixed(0);
+        return `
+          <div style="color:${color}; font-size:20px; font-weight:600;">
+            <span>${arrow}</span> <span>${percent}%</span>
+          </div>
+        `;
+      };
+      
+      comparisonHTML = `
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:24px;">
+          <div class="summary-card">
+            <div class="summary-label">vs Last Month</div>
+            ${formatChange(vsLastMonth, lastMonthTotal)}
+            <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${monthName(lastMonth)}: ${fmt(lastMonthTotal)}</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">vs Last ${monthName(lastYearMonth)}</div>
+            ${formatChange(vsLastYear, lastYearTotal)}
+            <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${lastYear}: ${fmt(lastYearTotal)}</div>
+          </div>
+        </div>
+      `;
+    }
+    
     content.innerHTML = `
     <div class="page-header">
       <h2 class="page-title">Monthly Expenses</h2>
@@ -671,6 +739,8 @@ async function renderMonthlyView() {
         <div class="summary-amount negative">${fmt(total)}</div>
       </div>
     </div>
+    
+    ${comparisonHTML}
     
     <div class="quick-entry">
       <div class="quick-entry-title">Add Monthly Expense</div>
