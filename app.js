@@ -296,6 +296,68 @@ async function renderDailyView() {
   
   const dateObj = new Date(state.selectedDate + 'T00:00:00');
   const dateDisplay = dateObj.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const isToday = state.selectedDate === todayStr();
+  
+  // Calculate comparison stats (only for today)
+  let comparisonHTML = '';
+  if (isToday) {
+    const allTxns = await db.transactions.toArray();
+    
+    // Yesterday
+    const yesterday = addDays(todayStr(), -1);
+    const yesterdayIncome = allTxns
+      .filter(t => t.date === yesterday && t.type === 'INCOME')
+      .reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    // Last Week (same day of week)
+    const lastWeek = addDays(todayStr(), -7);
+    const lastWeekIncome = allTxns
+      .filter(t => t.date === lastWeek && t.type === 'INCOME')
+      .reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    // Calculate percentage changes
+    const calcChange = (current, previous) => {
+      if (previous === 0) return current > 0 ? 100 : 0;
+      return ((current - previous) / previous) * 100;
+    };
+    
+    const vsYesterday = calcChange(totalIncome, yesterdayIncome);
+    const vsLastWeek = calcChange(totalIncome, lastWeekIncome);
+    
+    const formatChange = (change, prevAmount) => {
+      if (prevAmount === 0 && change === 0) {
+        return '<span style="color:var(--text-muted); font-size:14px;">No data</span>';
+      }
+      const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
+      const color = change > 0 ? '#2D7A4C' : change < 0 ? '#C13838' : '#999';
+      const percent = Math.abs(change).toFixed(0);
+      return `
+        <div style="color:${color}; font-size:20px; font-weight:600;">
+          <span>${arrow}</span> <span>${percent}%</span>
+        </div>
+      `;
+    };
+    
+    // Get day of week for label
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const todayDayOfWeek = new Date().getDay();
+    const dayName = dayNames[todayDayOfWeek];
+    
+    comparisonHTML = `
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:24px;">
+        <div class="summary-card">
+          <div class="summary-label">vs Yesterday</div>
+          ${formatChange(vsYesterday, yesterdayIncome)}
+          <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${fmt(yesterdayIncome)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">vs Last ${dayName}</div>
+          ${formatChange(vsLastWeek, lastWeekIncome)}
+          <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${fmt(lastWeekIncome)}</div>
+        </div>
+      </div>
+    `;
+  }
   
   content.innerHTML = `
     <div class="page-header">
@@ -323,6 +385,8 @@ async function renderDailyView() {
         <div class="summary-amount ${net >= 0 ? 'positive' : 'negative'}">${fmt(net)}</div>
       </div>
     </div>
+    
+    ${comparisonHTML}
     
     <div class="quick-entry">
       <div class="quick-entry-title">Quick Add Transaction</div>
@@ -781,7 +845,10 @@ async function renderReportsView() {
   const reportTypes = [
     { id: 'weekly', label: 'Weekly' },
     { id: 'monthly', label: 'Monthly' },
-    { id: 'category', label: 'By Category' }
+    { id: 'annual', label: 'Annual' },
+    { id: 'yoy', label: 'Year vs Year' },
+    { id: 'category', label: 'By Category' },
+    { id: 'export', label: '📥 Export' }
   ];
   
   const tabs = reportTypes.map(r =>
@@ -811,7 +878,10 @@ async function renderReportContent() {
   switch(state.reportType) {
     case 'weekly': await renderWeeklyReport(el); break;
     case 'monthly': await renderMonthlyReport(el); break;
+    case 'annual': await renderAnnualReport(el); break;
+    case 'yoy': await renderYOYReport(el); break;
     case 'category': await renderCategoryReport(el); break;
+    case 'export': await renderExportReport(el); break;
   }
 }
 
@@ -1258,6 +1328,278 @@ async function renderCategoryReport(el) {
       </div>
     `;
   }
+}
+
+async function renderAnnualReport(el) {
+  const year = state.selectedYear || new Date().getFullYear();
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+        <button class="btn-secondary" onclick="state.selectedYear--; renderReportsView()">← Prev Year</button>
+        <select class="form-select" style="width:auto;" onchange="state.selectedYear=parseInt(this.value); renderReportsView()">
+          ${[2023,2024,2025,2026,2027].map(y => 
+            `<option value="${y}" ${y === year ? 'selected' : ''}>${y}</option>`
+          ).join('')}
+        </select>
+        <button class="btn-secondary" onclick="state.selectedYear++; renderReportsView()">Next Year →</button>
+      </div>
+      <div id="annual-content">Loading...</div>
+    </div>
+  `;
+  
+  const allTxns = await db.transactions.toArray();
+  const allMExp = await db.monthlyExpenses.toArray();
+  
+  let yearIncome=0, yearTips=0, yearExp=0;
+  const rows = [];
+  
+  for (let m = 1; m <= 12; m++) {
+    const ms = `${year}-${String(m).padStart(2,'0')}`;
+    const txns = allTxns.filter(t => t.date?.startsWith(ms));
+    const mExps = allMExp.filter(e => e.year === year && e.month === m);
+    const inc = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
+    const tips = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
+    const dExp = txns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
+    const mExp = mExps.reduce((s,e)=>s+(e.amount||0),0);
+    yearIncome += inc;
+    yearTips += tips;
+    yearExp += dExp + mExp;
+    rows.push({ m, inc, tips, dExp, mExp, net: inc+tips-dExp-mExp });
+  }
+  
+  const annualContent = document.getElementById('annual-content');
+  if (annualContent) {
+    annualContent.innerHTML = `
+      <div class="summary-grid" style="margin-bottom:24px;">
+        <div class="summary-card">
+          <div class="summary-label">Services</div>
+          <div class="summary-amount positive">${fmt(yearIncome)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Tips</div>
+          <div class="summary-amount positive">${fmt(yearTips)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Expenses</div>
+          <div class="summary-amount negative">${fmt(yearExp)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Net Profit</div>
+          <div class="summary-amount ${yearIncome+yearTips-yearExp >= 0 ? 'positive' : 'negative'}">${fmt(yearIncome+yearTips-yearExp)}</div>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h4 style="margin-bottom:16px;">Monthly Breakdown</h4>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Income</th>
+              <th>Tips</th>
+              <th>Expenses</th>
+              <th>Net</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${monthName(r.m)}</td>
+                <td style="color:var(--success)">${fmt(r.inc)}</td>
+                <td style="color:var(--success)">${fmt(r.tips)}</td>
+                <td style="color:var(--danger)">${fmt(r.dExp+r.mExp)}</td>
+                <td style="font-weight:600; color:${r.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(r.net)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+}
+
+async function renderYOYReport(el) {
+  const currentYear = new Date().getFullYear();
+  const y1 = state.yoyYear1 || currentYear - 1;
+  const y2 = state.yoyYear2 || currentYear;
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;gap:12px;margin-bottom:24px;">
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">Year 1</label>
+          <select class="form-select" id="yoy-year1" onchange="state.yoyYear1=parseInt(this.value); renderReportsView()">
+            ${[2023,2024,2025,2026,2027].map(y => 
+              `<option value="${y}" ${y === y1 ? 'selected' : ''}>${y}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">Year 2</label>
+          <select class="form-select" id="yoy-year2" onchange="state.yoyYear2=parseInt(this.value); renderReportsView()">
+            ${[2023,2024,2025,2026,2027].map(y => 
+              `<option value="${y}" ${y === y2 ? 'selected' : ''}>${y}</option>`
+            ).join('')}
+          </select>
+        </div>
+      </div>
+      <div id="yoy-content">Loading...</div>
+    </div>
+  `;
+  
+  async function yearTotals(year) {
+    const txns = await db.transactions.toArray();
+    const yTxns = txns.filter(t => t.date?.startsWith(String(year)));
+    const mExps = await db.monthlyExpenses.toArray();
+    const yMExp = mExps.filter(e => e.year === year);
+    const inc = yTxns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
+    const tips = yTxns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
+    const dExp = yTxns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
+    const mExp = yMExp.reduce((s,e)=>s+(e.amount||0),0);
+    return { inc, tips, exp: dExp+mExp, net: inc+tips-dExp-mExp };
+  }
+  
+  const [a, b] = await Promise.all([yearTotals(y1), yearTotals(y2)]);
+  
+  const diff = (v1, v2) => {
+    if (v1 === 0) return '';
+    const pct = ((v2-v1)/Math.abs(v1)*100).toFixed(1);
+    const arrow = v2 >= v1 ? '▲' : '▼';
+    const color = v2 >= v1 ? 'var(--success)' : 'var(--danger)';
+    return `<span style="color:${color}; font-size:12px; margin-left:6px">${arrow} ${Math.abs(pct)}%</span>`;
+  };
+  
+  const yoyContent = document.getElementById('yoy-content');
+  if (yoyContent) {
+    yoyContent.innerHTML = `
+      <div class="card">
+        <h4 style="margin-bottom:16px;">Year Over Year Comparison</h4>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>${y1}</th>
+              <th>${y2}</th>
+              <th>Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Income</td>
+              <td style="color:var(--success)">${fmt(a.inc)}</td>
+              <td style="color:var(--success)">${fmt(b.inc)}</td>
+              <td>${diff(a.inc, b.inc)}</td>
+            </tr>
+            <tr>
+              <td>Tips</td>
+              <td style="color:var(--success)">${fmt(a.tips)}</td>
+              <td style="color:var(--success)">${fmt(b.tips)}</td>
+              <td>${diff(a.tips, b.tips)}</td>
+            </tr>
+            <tr>
+              <td>Expenses</td>
+              <td style="color:var(--danger)">${fmt(a.exp)}</td>
+              <td style="color:var(--danger)">${fmt(b.exp)}</td>
+              <td>${diff(a.exp, b.exp)}</td>
+            </tr>
+            <tr style="font-weight:600;">
+              <td>Net Profit</td>
+              <td style="color:${a.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(a.net)}</td>
+              <td style="color:${b.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(b.net)}</td>
+              <td>${diff(a.net, b.net)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+}
+
+async function renderExportReport(el) {
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="max-width:600px;">
+        <h4 style="margin-bottom:16px;">Export Data to CSV</h4>
+        <p style="color:var(--text-muted); margin-bottom:24px;">
+          Export your transaction data for use in Excel, Google Sheets, or other spreadsheet applications.
+        </p>
+        
+        <div style="display:flex;gap:12px;margin-bottom:24px;">
+          <div class="form-group" style="margin:0; flex:1;">
+            <label class="form-label">Start Date</label>
+            <input type="date" id="export-start" class="form-input" value="${addDays(todayStr(), -30)}">
+          </div>
+          <div class="form-group" style="margin:0; flex:1;">
+            <label class="form-label">End Date</label>
+            <input type="date" id="export-end" class="form-input" value="${todayStr()}">
+          </div>
+        </div>
+        
+        <button class="btn-primary" onclick="exportToCSV()">
+          📥 Download CSV File
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function exportToCSV() {
+  const from = document.getElementById('export-start')?.value;
+  const to = document.getElementById('export-end')?.value;
+  
+  if (!from || !to) {
+    showToast('Please select a date range');
+    return;
+  }
+  
+  const allTxns = await db.transactions.toArray();
+  const txns = allTxns.filter(t => t.date >= from && t.date <= to);
+  const mExps = await db.monthlyExpenses.toArray();
+  
+  let csv = 'Date,Type,Category,Service Amount,Tip Amount,Tip Method,Payment Method,Notes\n';
+  
+  txns.forEach(t => {
+    const row = [
+      t.date,
+      t.type,
+      t.category || '',
+      t.type === 'INCOME' ? (t.serviceAmount || 0) : (t.amount || 0),
+      t.type === 'INCOME' ? (t.tipAmount || 0) : '',
+      t.type === 'INCOME' ? (t.tipMethod || '') : '',
+      t.paymentMethod || '',
+      (t.notes || '').replace(/,/g, ';')
+    ];
+    csv += row.join(',') + '\n';
+  });
+  
+  csv += '\n\nMonthly Expenses:\nYear,Month,Category,Amount,Notes\n';
+  mExps.filter(e => {
+    const d = `${e.year}-${String(e.month).padStart(2,'0')}-01`;
+    return d >= from && d <= to;
+  }).forEach(e => {
+    const row = [
+      e.year,
+      e.month,
+      e.category || '',
+      e.amount || 0,
+      (e.notes || '').replace(/,/g, ';')
+    ];
+    csv += row.join(',') + '\n';
+  });
+  
+  // Download CSV
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `salon-data-${from}-to-${to}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+  
+  showToast('CSV file downloaded!');
 }
 
 
