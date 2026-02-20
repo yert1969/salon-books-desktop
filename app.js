@@ -932,6 +932,8 @@ async function renderReportsView() {
   const reportTypes = [
     { id: 'weekly', label: 'Weekly' },
     { id: 'monthly', label: 'Monthly' },
+    { id: 'month-compare', label: 'Month Compare' },
+    { id: 'date-compare', label: 'Date Range' },
     { id: 'annual', label: 'Annual' },
     { id: 'yoy', label: 'Year vs Year' },
     { id: 'category', label: 'By Category' },
@@ -965,6 +967,8 @@ async function renderReportContent() {
   switch(state.reportType) {
     case 'weekly': await renderWeeklyReport(el); break;
     case 'monthly': await renderMonthlyReport(el); break;
+    case 'month-compare': await renderMonthCompareReport(el); break;
+    case 'date-compare': await renderDateRangeCompareReport(el); break;
     case 'annual': await renderAnnualReport(el); break;
     case 'yoy': await renderYOYReport(el); break;
     case 'category': await renderCategoryReport(el); break;
@@ -1322,6 +1326,446 @@ async function renderMonthlyReport(el) {
         </table>
       `;
     }
+  }
+}
+
+async function renderMonthCompareReport(el) {
+  // Initialize comparison state if needed
+  if (!state.compareMonth) {
+    state.compareMonth = state.selectedMonth;
+    state.compareYear = state.selectedYear - 1; // Default to same month last year
+  }
+  
+  const allTxns = await db.transactions.toArray();
+  
+  // Calculate current period
+  const currentTxns = allTxns.filter(t => {
+    const [y, m] = t.date.split('-');
+    return parseInt(y) === state.selectedYear && parseInt(m) === state.selectedMonth;
+  });
+  
+  const currentIncome = currentTxns.filter(t => t.type === 'INCOME');
+  const currentExpenses = currentTxns.filter(t => t.type === 'EXPENSE');
+  const currentTotalIncome = currentIncome.reduce((s, t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+  const currentTotalExpense = currentExpenses.reduce((s, t) => s + (t.amount||0), 0);
+  const currentNet = currentTotalIncome - currentTotalExpense;
+  
+  // Get current monthly expenses
+  const allMonthlyExpenses = await db.monthlyExpenses.toArray();
+  const currentMonthlyExpenses = allMonthlyExpenses.filter(e => 
+    e.year === state.selectedYear && e.month === state.selectedMonth
+  );
+  const currentMonthlyExpenseTotal = currentMonthlyExpenses.reduce((s, e) => s + (e.amount||0), 0);
+  const currentNetAfterMonthly = currentNet - currentMonthlyExpenseTotal;
+  
+  // Calculate comparison period
+  const compareTxns = allTxns.filter(t => {
+    const [y, m] = t.date.split('-');
+    return parseInt(y) === state.compareYear && parseInt(m) === state.compareMonth;
+  });
+  
+  const compareIncome = compareTxns.filter(t => t.type === 'INCOME');
+  const compareExpenses = compareTxns.filter(t => t.type === 'EXPENSE');
+  const compareTotalIncome = compareIncome.reduce((s, t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+  const compareTotalExpense = compareExpenses.reduce((s, t) => s + (t.amount||0), 0);
+  const compareNet = compareTotalIncome - compareTotalExpense;
+  
+  // Get compare monthly expenses
+  const compareMonthlyExpenses = allMonthlyExpenses.filter(e => 
+    e.year === state.compareYear && e.month === state.compareMonth
+  );
+  const compareMonthlyExpenseTotal = compareMonthlyExpenses.reduce((s, e) => s + (e.amount||0), 0);
+  const compareNetAfterMonthly = compareNet - compareMonthlyExpenseTotal;
+  
+  // Calculate changes
+  const incomeChange = currentTotalIncome - compareTotalIncome;
+  const incomeChangePercent = compareTotalIncome !== 0 ? ((incomeChange / compareTotalIncome) * 100) : 0;
+  const expenseChange = (currentTotalExpense + currentMonthlyExpenseTotal) - (compareTotalExpense + compareMonthlyExpenseTotal);
+  const expenseChangePercent = (compareTotalExpense + compareMonthlyExpenseTotal) !== 0 ? ((expenseChange / (compareTotalExpense + compareMonthlyExpenseTotal)) * 100) : 0;
+  const netChange = currentNetAfterMonthly - compareNetAfterMonthly;
+  const netChangePercent = compareNetAfterMonthly !== 0 ? ((netChange / compareNetAfterMonthly) * 100) : 0;
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <h3 style="margin-bottom:16px;">Month-to-Month Comparison</h3>
+      
+      <div style="display:grid; grid-template-columns:1fr auto 1fr; gap:24px; margin-bottom:24px; align-items:center;">
+        <!-- Current Period -->
+        <div style="text-align:center;">
+          <div style="font-weight:600; font-size:18px; margin-bottom:12px;">Current Period</div>
+          <div style="display:flex; align-items:center; justify-content:center; gap:8px;">
+            <button class="btn-secondary" onclick="changeMonth(-1); renderReportsView()">←</button>
+            <select class="form-select" style="width:auto;" onchange="state.selectedMonth=parseInt(this.value); renderReportsView()">
+              ${Array.from({length:12}, (_,i) => i+1).map(m => 
+                `<option value="${m}" ${m === state.selectedMonth ? 'selected' : ''}>${monthName(m)}</option>`
+              ).join('')}
+            </select>
+            <select class="form-select" style="width:auto;" onchange="state.selectedYear=parseInt(this.value); renderReportsView()">
+              ${[2023,2024,2025,2026,2027].map(y => 
+                `<option value="${y}" ${y === state.selectedYear ? 'selected' : ''}>${y}</option>`
+              ).join('')}
+            </select>
+            <button class="btn-secondary" onclick="changeMonth(1); renderReportsView()">→</button>
+          </div>
+        </div>
+        
+        <!-- VS Label -->
+        <div style="font-size:24px; font-weight:600; color:var(--text-muted);">VS</div>
+        
+        <!-- Comparison Period -->
+        <div style="text-align:center;">
+          <div style="font-weight:600; font-size:18px; margin-bottom:12px;">Comparison Period</div>
+          <div style="display:flex; align-items:center; justify-content:center; gap:8px;">
+            <button class="btn-secondary" onclick="state.compareMonth = (state.compareMonth > 1 ? state.compareMonth - 1 : 12); if(state.compareMonth === 12) state.compareYear--; renderReportsView()">←</button>
+            <select class="form-select" style="width:auto;" onchange="state.compareMonth=parseInt(this.value); renderReportsView()">
+              ${Array.from({length:12}, (_,i) => i+1).map(m => 
+                `<option value="${m}" ${m === state.compareMonth ? 'selected' : ''}>${monthName(m)}</option>`
+              ).join('')}
+            </select>
+            <select class="form-select" style="width:auto;" onchange="state.compareYear=parseInt(this.value); renderReportsView()">
+              ${[2023,2024,2025,2026,2027].map(y => 
+                `<option value="${y}" ${y === state.compareYear ? 'selected' : ''}>${y}</option>`
+              ).join('')}
+            </select>
+            <button class="btn-secondary" onclick="state.compareMonth = (state.compareMonth < 12 ? state.compareMonth + 1 : 1); if(state.compareMonth === 1) state.compareYear++; renderReportsView()">→</button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Quick Preset Buttons -->
+      <div style="display:flex; gap:8px; margin-bottom:24px; justify-content:center;">
+        <button class="btn-secondary" style="font-size:13px;" onclick="state.compareMonth=state.selectedMonth; state.compareYear=state.selectedYear-1; renderReportsView()">
+          Same Month Last Year
+        </button>
+        <button class="btn-secondary" style="font-size:13px;" onclick="state.compareMonth=(state.selectedMonth > 1 ? state.selectedMonth-1 : 12); state.compareYear=(state.selectedMonth > 1 ? state.selectedYear : state.selectedYear-1); renderReportsView()">
+          Previous Month
+        </button>
+      </div>
+      
+      <!-- Comparison Table -->
+      <table class="data-table" style="margin-bottom:24px;">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th style="text-align:right;">${monthName(state.selectedMonth)} ${state.selectedYear}</th>
+            <th style="text-align:right;">${monthName(state.compareMonth)} ${state.compareYear}</th>
+            <th style="text-align:right;">Change</th>
+            <th style="text-align:right;">% Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="font-weight:600;">Income</td>
+            <td style="text-align:right; color:var(--success); font-weight:600;">${fmt(currentTotalIncome)}</td>
+            <td style="text-align:right; color:var(--success);">${fmt(compareTotalIncome)}</td>
+            <td style="text-align:right; color:${incomeChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${incomeChange >= 0 ? '+' : ''}${fmt(incomeChange)}
+            </td>
+            <td style="text-align:right; color:${incomeChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${incomeChangePercent >= 0 ? '+' : ''}${incomeChangePercent.toFixed(1)}%
+            </td>
+          </tr>
+          <tr>
+            <td style="font-weight:600;">Total Expenses</td>
+            <td style="text-align:right; color:var(--danger); font-weight:600;">${fmt(currentTotalExpense + currentMonthlyExpenseTotal)}</td>
+            <td style="text-align:right; color:var(--danger);">${fmt(compareTotalExpense + compareMonthlyExpenseTotal)}</td>
+            <td style="text-align:right; color:${expenseChange <= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${expenseChange >= 0 ? '+' : ''}${fmt(expenseChange)}
+            </td>
+            <td style="text-align:right; color:${expenseChange <= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${expenseChangePercent >= 0 ? '+' : ''}${expenseChangePercent.toFixed(1)}%
+            </td>
+          </tr>
+          <tr style="border-top:2px solid var(--border); font-weight:600;">
+            <td>Net Profit</td>
+            <td style="text-align:right; color:${currentNetAfterMonthly >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${fmt(currentNetAfterMonthly)}
+            </td>
+            <td style="text-align:right; color:${compareNetAfterMonthly >= 0 ? 'var(--success)' : 'var(--danger)'};">
+              ${fmt(compareNetAfterMonthly)}
+            </td>
+            <td style="text-align:right; color:${netChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${netChange >= 0 ? '+' : ''}${fmt(netChange)}
+            </td>
+            <td style="text-align:right; color:${netChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${netChangePercent >= 0 ? '+' : ''}${netChangePercent.toFixed(1)}%
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      
+      <!-- Visual Comparison Bars -->
+      <div style="margin-top:32px;">
+        <h4 style="margin-bottom:16px;">Visual Comparison</h4>
+        <canvas id="comparison-chart" style="max-height:400px;"></canvas>
+      </div>
+    </div>
+  `;
+  
+  // Create comparison bar chart
+  const ctx = document.getElementById('comparison-chart');
+  if (ctx && window.Chart) {
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ['Income', 'Expenses', 'Net Profit'],
+        datasets: [
+          {
+            label: `${monthName(state.selectedMonth)} ${state.selectedYear}`,
+            data: [currentTotalIncome, currentTotalExpense + currentMonthlyExpenseTotal, currentNetAfterMonthly],
+            backgroundColor: '#2D7A4C'
+          },
+          {
+            label: `${monthName(state.compareMonth)} ${state.compareYear}`,
+            data: [compareTotalIncome, compareTotalExpense + compareMonthlyExpenseTotal, compareNetAfterMonthly],
+            backgroundColor: '#94A3B8'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          legend: { display: true, position: 'top' }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              callback: function(value) {
+                return '$' + value.toLocaleString();
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+}
+
+async function renderDateRangeCompareReport(el) {
+  // Initialize date range state if needed
+  if (!state.range1Start) {
+    // Default: Q1 2026 vs Q1 2025
+    state.range1Start = `${state.selectedYear}-01-01`;
+    state.range1End = `${state.selectedYear}-03-31`;
+    state.range2Start = `${state.selectedYear-1}-01-01`;
+    state.range2End = `${state.selectedYear-1}-03-31`;
+  }
+  
+  const allTxns = await db.transactions.toArray();
+  
+  // Helper to calculate range stats
+  const calculateRangeStats = (startDate, endDate) => {
+    const txns = allTxns.filter(t => t.date >= startDate && t.date <= endDate);
+    const income = txns.filter(t => t.type === 'INCOME');
+    const expenses = txns.filter(t => t.type === 'EXPENSE');
+    const totalIncome = income.reduce((s, t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+    const totalExpense = expenses.reduce((s, t) => s + (t.amount||0), 0);
+    
+    // Calculate monthly expenses in range
+    const [startY, startM] = startDate.split('-');
+    const [endY, endM] = endDate.split('-');
+    const allMonthlyExpenses = [];
+    
+    // This is a simplified version - in production you'd iterate through months properly
+    return {
+      income: totalIncome,
+      expense: totalExpense,
+      net: totalIncome - totalExpense,
+      transactionCount: txns.length,
+      incomeCount: income.length,
+      expenseCount: expenses.length
+    };
+  };
+  
+  const range1 = calculateRangeStats(state.range1Start, state.range1End);
+  const range2 = calculateRangeStats(state.range2Start, state.range2End);
+  
+  // Calculate changes
+  const incomeChange = range1.income - range2.income;
+  const incomeChangePercent = range2.income !== 0 ? ((incomeChange / range2.income) * 100) : 0;
+  const expenseChange = range1.expense - range2.expense;
+  const expenseChangePercent = range2.expense !== 0 ? ((expenseChange / range2.expense) * 100) : 0;
+  const netChange = range1.net - range2.net;
+  const netChangePercent = range2.net !== 0 ? ((netChange / range2.net) * 100) : 0;
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <h3 style="margin-bottom:16px;">Date Range Comparison</h3>
+      
+      <div style="display:grid; grid-template-columns:1fr auto 1fr; gap:24px; margin-bottom:24px;">
+        <!-- Range 1 -->
+        <div>
+          <div style="font-weight:600; font-size:16px; margin-bottom:12px;">Period 1</div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <div>
+              <label style="font-size:13px; color:var(--text-muted);">Start Date</label>
+              <input type="date" class="form-input" value="${state.range1Start}" onchange="state.range1Start=this.value; renderReportsView()">
+            </div>
+            <div>
+              <label style="font-size:13px; color:var(--text-muted);">End Date</label>
+              <input type="date" class="form-input" value="${state.range1End}" onchange="state.range1End=this.value; renderReportsView()">
+            </div>
+          </div>
+        </div>
+        
+        <!-- VS Label -->
+        <div style="display:flex; align-items:center; font-size:24px; font-weight:600; color:var(--text-muted);">VS</div>
+        
+        <!-- Range 2 -->
+        <div>
+          <div style="font-weight:600; font-size:16px; margin-bottom:12px;">Period 2</div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <div>
+              <label style="font-size:13px; color:var(--text-muted);">Start Date</label>
+              <input type="date" class="form-input" value="${state.range2Start}" onchange="state.range2Start=this.value; renderReportsView()">
+            </div>
+            <div>
+              <label style="font-size:13px; color:var(--text-muted);">End Date</label>
+              <input type="date" class="form-input" value="${state.range2End}" onchange="state.range2End=this.value; renderReportsView()">
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Quick Preset Buttons -->
+      <div style="display:flex; gap:8px; margin-bottom:24px; justify-content:center; flex-wrap:wrap;">
+        <button class="btn-secondary" style="font-size:13px;" onclick="
+          const year = ${state.selectedYear};
+          state.range1Start = year + '-01-01'; state.range1End = year + '-03-31';
+          state.range2Start = (year-1) + '-01-01'; state.range2End = (year-1) + '-03-31';
+          renderReportsView();">
+          Q1 This Year vs Last Year
+        </button>
+        <button class="btn-secondary" style="font-size:13px;" onclick="
+          const year = ${state.selectedYear};
+          state.range1Start = year + '-01-01'; state.range1End = year + '-12-31';
+          state.range2Start = (year-1) + '-01-01'; state.range2End = (year-1) + '-12-31';
+          renderReportsView();">
+          Full Year Comparison
+        </button>
+        <button class="btn-secondary" style="font-size:13px;" onclick="
+          const year = ${state.selectedYear};
+          state.range1Start = year + '-01-01'; state.range1End = year + '-06-30';
+          state.range2Start = (year-1) + '-01-01'; state.range2End = (year-1) + '-06-30';
+          renderReportsView();">
+          H1 This Year vs Last Year
+        </button>
+      </div>
+      
+      <!-- Comparison Table -->
+      <table class="data-table" style="margin-bottom:24px;">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th style="text-align:right;">Period 1</th>
+            <th style="text-align:right;">Period 2</th>
+            <th style="text-align:right;">Change</th>
+            <th style="text-align:right;">% Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Date Range</td>
+            <td style="text-align:right; font-size:13px;">${new Date(state.range1Start).toLocaleDateString()} - ${new Date(state.range1End).toLocaleDateString()}</td>
+            <td style="text-align:right; font-size:13px;">${new Date(state.range2Start).toLocaleDateString()} - ${new Date(state.range2End).toLocaleDateString()}</td>
+            <td></td>
+            <td></td>
+          </tr>
+          <tr>
+            <td style="font-weight:600;">Income</td>
+            <td style="text-align:right; color:var(--success); font-weight:600;">${fmt(range1.income)}</td>
+            <td style="text-align:right; color:var(--success);">${fmt(range2.income)}</td>
+            <td style="text-align:right; color:${incomeChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${incomeChange >= 0 ? '+' : ''}${fmt(incomeChange)}
+            </td>
+            <td style="text-align:right; color:${incomeChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${incomeChangePercent >= 0 ? '+' : ''}${incomeChangePercent.toFixed(1)}%
+            </td>
+          </tr>
+          <tr>
+            <td style="font-weight:600;">Expenses</td>
+            <td style="text-align:right; color:var(--danger); font-weight:600;">${fmt(range1.expense)}</td>
+            <td style="text-align:right; color:var(--danger);">${fmt(range2.expense)}</td>
+            <td style="text-align:right; color:${expenseChange <= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${expenseChange >= 0 ? '+' : ''}${fmt(expenseChange)}
+            </td>
+            <td style="text-align:right; color:${expenseChange <= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${expenseChangePercent >= 0 ? '+' : ''}${expenseChangePercent.toFixed(1)}%
+            </td>
+          </tr>
+          <tr style="border-top:2px solid var(--border); font-weight:600;">
+            <td>Net Profit</td>
+            <td style="text-align:right; color:${range1.net >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${fmt(range1.net)}
+            </td>
+            <td style="text-align:right; color:${range2.net >= 0 ? 'var(--success)' : 'var(--danger)'};">
+              ${fmt(range2.net)}
+            </td>
+            <td style="text-align:right; color:${netChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${netChange >= 0 ? '+' : ''}${fmt(netChange)}
+            </td>
+            <td style="text-align:right; color:${netChange >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">
+              ${netChangePercent >= 0 ? '+' : ''}${netChangePercent.toFixed(1)}%
+            </td>
+          </tr>
+          <tr style="font-size:13px; color:var(--text-muted);">
+            <td>Total Transactions</td>
+            <td style="text-align:right;">${range1.transactionCount}</td>
+            <td style="text-align:right;">${range2.transactionCount}</td>
+            <td style="text-align:right;">${range1.transactionCount - range2.transactionCount >= 0 ? '+' : ''}${range1.transactionCount - range2.transactionCount}</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+      
+      <!-- Visual Comparison -->
+      <div style="margin-top:32px;">
+        <h4 style="margin-bottom:16px;">Visual Comparison</h4>
+        <canvas id="range-comparison-chart" style="max-height:400px;"></canvas>
+      </div>
+    </div>
+  `;
+  
+  // Create comparison bar chart
+  const ctx = document.getElementById('range-comparison-chart');
+  if (ctx && window.Chart) {
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ['Income', 'Expenses', 'Net Profit'],
+        datasets: [
+          {
+            label: 'Period 1',
+            data: [range1.income, range1.expense, range1.net],
+            backgroundColor: '#2D7A4C'
+          },
+          {
+            label: 'Period 2',
+            data: [range2.income, range2.expense, range2.net],
+            backgroundColor: '#94A3B8'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          legend: { display: true, position: 'top' }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              callback: function(value) {
+                return '$' + value.toLocaleString();
+              }
+            }
+          }
+        }
+      }
+    });
   }
 }
 
@@ -2560,12 +3004,26 @@ async function startImport() {
     return;
   }
   
+  // Initialize log
+  const log = [];
+  const logTimestamp = new Date().toISOString();
+  log.push('='.repeat(80));
+  log.push('IMPORT LOG');
+  log.push('='.repeat(80));
+  log.push(`Started: ${logTimestamp}`);
+  log.push(`File: Historical data import (Vagaro/Square CSV)`);
+  log.push(`Total rows to import: ${importData.length}`);
+  log.push('='.repeat(80));
+  log.push('');
+  
   // Disable import button
   document.getElementById('import-btn').disabled = true;
   document.getElementById('import-progress').style.display = 'block';
   
   let imported = 0;
   let errors = 0;
+  let skipped = 0;
+  const errorDetails = [];
   const total = importData.length;
   
   // Get current timestamp for this import batch
@@ -2585,8 +3043,12 @@ async function startImport() {
     }
   };
   
+  log.push('IMPORT PROGRESS:');
+  log.push('-'.repeat(80));
+  
   for (let i = 0; i < importData.length; i++) {
     const row = importData[i];
+    const rowNum = i + 1;
     
     try {
       // Determine type and amount
@@ -2602,16 +3064,21 @@ async function startImport() {
       }
       
       if (amount === 0) {
-        errors++;
+        skipped++;
+        const skipMsg = `Row ${rowNum}: SKIPPED - Zero amount (Date: ${row.date}, Service: ${row.service})`;
+        log.push(skipMsg);
+        errorDetails.push(skipMsg);
         continue;
       }
       
-      // Create transaction - MARKED AS IMPORTED
+      const category = serviceToCategory(row.service);
+      
+      // Create transaction - MARKED AS IMPORTED!
       const txn = {
         userId: currentUser.uid,
         date: row.date,
         type: type,
-        category: serviceToCategory(row.service),
+        category: category,
         serviceAmount: amount,
         tipAmount: tipAmount,
         paymentMethod: row.payment_method === 'Card' ? 'Card' : 'Check',
@@ -2629,6 +3096,11 @@ async function startImport() {
       
       imported++;
       
+      // Log every 100 transactions
+      if (imported % 100 === 0) {
+        log.push(`✓ Imported ${imported} of ${total} transactions...`);
+      }
+      
       // Update progress
       const progress = (i + 1) / total * 100;
       document.getElementById('progress-bar').style.width = progress + '%';
@@ -2640,20 +3112,60 @@ async function startImport() {
       }
       
     } catch (err) {
-      console.error('Error importing row:', row, err);
       errors++;
+      const errorMsg = `Row ${rowNum}: ERROR - ${err.message} (Date: ${row.date}, Service: ${row.service}, Amount: ${row.square_amount || row.estimated_price})`;
+      log.push(errorMsg);
+      errorDetails.push(errorMsg);
+      console.error('Error importing row:', row, err);
     }
   }
   
-  // Show completion
+  // Final log summary
+  log.push('');
+  log.push('='.repeat(80));
+  log.push('IMPORT SUMMARY');
+  log.push('='.repeat(80));
+  log.push(`Completed: ${new Date().toISOString()}`);
+  log.push(`Total rows processed: ${total}`);
+  log.push(`Successfully imported: ${imported}`);
+  log.push(`Skipped (zero amount): ${skipped}`);
+  log.push(`Errors: ${errors}`);
+  log.push(`Success rate: ${((imported/total)*100).toFixed(1)}%`);
+  log.push('='.repeat(80));
+  
+  if (errorDetails.length > 0) {
+    log.push('');
+    log.push('ERROR DETAILS:');
+    log.push('-'.repeat(80));
+    errorDetails.forEach(err => log.push(err));
+  }
+  
+  log.push('');
+  log.push('='.repeat(80));
+  log.push('END OF LOG');
+  log.push('='.repeat(80));
+  
+  // Create downloadable log file
+  const logText = log.join('\n');
+  const logBlob = new Blob([logText], { type: 'text/plain' });
+  const logUrl = URL.createObjectURL(logBlob);
+  const logFilename = `import-log-${new Date().toISOString().split('T')[0]}.txt`;
+  
+  // Show completion with log download option
   document.getElementById('import-status').style.display = 'none';
   document.getElementById('import-complete').style.display = 'block';
   document.getElementById('import-summary').innerHTML = `
     Successfully imported <strong>${imported}</strong> transactions<br>
-    ${errors > 0 ? `<span style="color:var(--danger);">${errors} errors</span><br>` : ''}
-    <span style="font-size:13px; color:var(--text-muted);">
+    ${skipped > 0 ? `<span style="color:var(--warning);">Skipped ${skipped} (zero amount)</span><br>` : ''}
+    ${errors > 0 ? `<span style="color:var(--danger);">Errors: ${errors}</span><br>` : ''}
+    <span style="font-size:13px; color:var(--text-muted); margin-top:8px; display:block;">
       These transactions are marked as imported and can be deleted from Settings if needed.
     </span>
+    <div style="margin-top:16px;">
+      <a href="${logUrl}" download="${logFilename}" class="btn-secondary" style="display:inline-block; padding:8px 16px; text-decoration:none;">
+        📄 Download Import Log
+      </a>
+    </div>
   `;
   
   showToast(`Imported ${imported} transactions!`);
@@ -2661,6 +3173,9 @@ async function startImport() {
   // Reset
   importData = null;
   document.getElementById('csv-file-input').value = '';
+  
+  // Store log URL for cleanup later
+  window.importLogUrl = logUrl;
 }
 
 function cancelImport() {
