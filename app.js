@@ -52,6 +52,17 @@ function todayStr() {
   return `${year}-${month}-${day}`;
 }
 
+// Helper to ensure date input always shows correct local date
+function ensureLocalDate(dateStr) {
+  if (!dateStr) return todayStr();
+  // If dateStr is valid YYYY-MM-DD, return as-is
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return dateStr;
+  }
+  // Otherwise return today
+  return todayStr();
+}
+
 function addDays(dateStr, days) {
   const d = new Date(dateStr + 'T00:00:00');
   d.setDate(d.getDate() + days);
@@ -491,9 +502,12 @@ async function quickAddTransaction() {
     return;
   }
   
+  // TIMEZONE FIX: Ensure we always use a valid local date
+  const date = ensureLocalDate(state.selectedDate);
+  
   const txn = {
     userId: currentUser.uid,
-    date: state.selectedDate,
+    date: date,
     type: type,
     category: category,
     createdAt: firebase.firestore.Timestamp.now()
@@ -577,9 +591,12 @@ async function saveEditTransaction(id) {
   if (!t) return;
   
   const isIncome = t.type === 'INCOME';
-  const date = document.getElementById('edit-date').value;
+  let date = document.getElementById('edit-date').value;
   const category = document.getElementById('edit-category').value;
   const notes = document.getElementById('edit-notes').value;
+  
+  // TIMEZONE FIX: Ensure date is valid
+  date = ensureLocalDate(date);
   
   const updates = { date, category, notes };
   
