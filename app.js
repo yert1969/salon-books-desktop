@@ -1394,7 +1394,7 @@ async function renderMonthCompareReport(el) {
         <div style="text-align:center;">
           <div style="font-weight:600; font-size:18px; margin-bottom:12px;">Current Period</div>
           <div style="display:flex; align-items:center; justify-content:center; gap:8px;">
-            <button class="btn-secondary" onclick="changeMonth(-1); renderReportsView()">←</button>
+            <button class="btn-secondary" onclick="let m=state.selectedMonth-1; let y=state.selectedYear; if(m<1){m=12;y--;} state.selectedMonth=m; state.selectedYear=y; renderReportsView()">←</button>
             <select class="form-select" style="width:auto;" onchange="state.selectedMonth=parseInt(this.value); renderReportsView()">
               ${Array.from({length:12}, (_,i) => i+1).map(m => 
                 `<option value="${m}" ${m === state.selectedMonth ? 'selected' : ''}>${monthName(m)}</option>`
@@ -1405,7 +1405,7 @@ async function renderMonthCompareReport(el) {
                 `<option value="${y}" ${y === state.selectedYear ? 'selected' : ''}>${y}</option>`
               ).join('')}
             </select>
-            <button class="btn-secondary" onclick="changeMonth(1); renderReportsView()">→</button>
+            <button class="btn-secondary" onclick="let m=state.selectedMonth+1; let y=state.selectedYear; if(m>12){m=1;y++;} state.selectedMonth=m; state.selectedYear=y; renderReportsView()">→</button>
           </div>
         </div>
         
@@ -1416,7 +1416,7 @@ async function renderMonthCompareReport(el) {
         <div style="text-align:center;">
           <div style="font-weight:600; font-size:18px; margin-bottom:12px;">Comparison Period</div>
           <div style="display:flex; align-items:center; justify-content:center; gap:8px;">
-            <button class="btn-secondary" onclick="state.compareMonth = (state.compareMonth > 1 ? state.compareMonth - 1 : 12); if(state.compareMonth === 12) state.compareYear--; renderReportsView()">←</button>
+            <button class="btn-secondary" onclick="let m=state.compareMonth-1; let y=state.compareYear; if(m<1){m=12;y--;} state.compareMonth=m; state.compareYear=y; renderReportsView()">←</button>
             <select class="form-select" style="width:auto;" onchange="state.compareMonth=parseInt(this.value); renderReportsView()">
               ${Array.from({length:12}, (_,i) => i+1).map(m => 
                 `<option value="${m}" ${m === state.compareMonth ? 'selected' : ''}>${monthName(m)}</option>`
@@ -1427,7 +1427,7 @@ async function renderMonthCompareReport(el) {
                 `<option value="${y}" ${y === state.compareYear ? 'selected' : ''}>${y}</option>`
               ).join('')}
             </select>
-            <button class="btn-secondary" onclick="state.compareMonth = (state.compareMonth < 12 ? state.compareMonth + 1 : 1); if(state.compareMonth === 1) state.compareYear++; renderReportsView()">→</button>
+            <button class="btn-secondary" onclick="let m=state.compareMonth+1; let y=state.compareYear; if(m>12){m=1;y++;} state.compareMonth=m; state.compareYear=y; renderReportsView()">→</button>
           </div>
         </div>
       </div>
