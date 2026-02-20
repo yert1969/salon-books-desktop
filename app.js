@@ -1903,9 +1903,43 @@ async function renderSettingsView() {
     </div>
     
     <div class="card" style="margin-top:16px;">
+      <h3 style="font-size:18px; margin-bottom:16px;">Restore from Backup</h3>
+      <p style="color:var(--text-muted); margin-bottom:16px;">
+        Restore data from a CSV backup file that you previously exported. This will add the backup data to your database.
+      </p>
+      
+      <div style="border: 2px dashed var(--border); border-radius:8px; padding:24px; text-align:center; background:var(--bg-secondary); margin-bottom:12px;">
+        <input type="file" id="backup-file-input" accept=".csv" style="display:none;" onchange="handleBackupUpload(event)">
+        <div style="cursor:pointer;" onclick="document.getElementById('backup-file-input').click()">
+          <div style="font-size:40px; margin-bottom:8px;">💾</div>
+          <div style="font-size:15px; font-weight:600; margin-bottom:6px;">
+            Restore from Backup CSV
+          </div>
+          <div style="font-size:13px; color:var(--text-muted);">
+            Upload a CSV file exported from Reports → Export
+          </div>
+        </div>
+      </div>
+      
+      <div id="restore-status" style="display:none;">
+        <div style="background:var(--bg-secondary); border-radius:8px; padding:16px; margin-bottom:12px;">
+          <div id="restore-preview"></div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn-primary" onclick="executeRestore()" style="flex:1;">
+            Restore Data
+          </button>
+          <button class="btn-secondary" onclick="cancelRestore()" style="flex:1;">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <div class="card" style="margin-top:16px;">
       <h3 style="font-size:18px; margin-bottom:16px;">Import Historical Data</h3>
       <p style="color:var(--text-muted); margin-bottom:16px;">
-        Import transactions from your historical data CSV file. This will add past transactions to your database.
+        Import transactions from your historical data CSV file (Vagaro/Square format). This will add past transactions to your database.
       </p>
       <div id="import-stats" style="display:none; background:var(--bg-secondary); border-radius:8px; padding:16px; margin-bottom:16px;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -2083,6 +2117,187 @@ document.addEventListener('keydown', (e) => {
     navigate('reports');
   }
 });
+
+// ============================================================
+// RESTORE FROM BACKUP
+// ============================================================
+
+let restoreData = null;
+
+function handleBackupUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    parseBackupCSV(text);
+  };
+  reader.readAsText(file);
+}
+
+function parseBackupCSV(text) {
+  const lines = text.split('\n');
+  
+  const transactions = [];
+  const monthlyExpenses = [];
+  
+  let currentSection = 'transactions';
+  let txnHeaders = [];
+  let expHeaders = [];
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    if (!line) continue;
+    
+    // Check for section headers
+    if (line === 'Monthly Expenses:') {
+      currentSection = 'monthly';
+      continue;
+    }
+    
+    const values = line.split(',').map(v => v.trim());
+    
+    if (currentSection === 'transactions') {
+      if (line.startsWith('Date,Type,Category')) {
+        txnHeaders = values;
+        continue;
+      }
+      
+      if (txnHeaders.length > 0 && values.length >= 4) {
+        transactions.push({
+          date: values[0],
+          type: values[1],
+          category: values[2],
+          serviceAmount: parseFloat(values[3]) || 0,
+          tipAmount: parseFloat(values[4]) || 0,
+          tipMethod: values[5] || '',
+          paymentMethod: values[6] || '',
+          notes: values[7] || ''
+        });
+      }
+    } else if (currentSection === 'monthly') {
+      if (line.startsWith('Year,Month,Category')) {
+        expHeaders = values;
+        continue;
+      }
+      
+      if (expHeaders.length > 0 && values.length >= 4) {
+        monthlyExpenses.push({
+          year: parseInt(values[0]),
+          month: parseInt(values[1]),
+          category: values[2],
+          amount: parseFloat(values[3]) || 0,
+          notes: values[4] || ''
+        });
+      }
+    }
+  }
+  
+  restoreData = { transactions, monthlyExpenses };
+  showRestorePreview();
+}
+
+function showRestorePreview() {
+  if (!restoreData) return;
+  
+  const { transactions, monthlyExpenses } = restoreData;
+  
+  const previewHTML = `
+    <div style="font-weight:600; margin-bottom:12px;">Ready to Restore:</div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; font-size:14px;">
+      <div>
+        <div style="color:var(--text-muted);">Transactions:</div>
+        <div style="font-size:18px; font-weight:600;">${transactions.length}</div>
+      </div>
+      <div>
+        <div style="color:var(--text-muted);">Monthly Expenses:</div>
+        <div style="font-size:18px; font-weight:600;">${monthlyExpenses.length}</div>
+      </div>
+    </div>
+    <div style="margin-top:12px; padding:12px; background:#fff3cd; border:1px solid #ffc107; border-radius:4px; font-size:13px; color:#856404;">
+      ⚠️ This will add the backup data to your existing database. Existing data will not be affected.
+    </div>
+  `;
+  
+  document.getElementById('restore-preview').innerHTML = previewHTML;
+  document.getElementById('restore-status').style.display = 'block';
+}
+
+async function executeRestore() {
+  if (!restoreData) {
+    showToast('No backup data to restore');
+    return;
+  }
+  
+  const { transactions, monthlyExpenses } = restoreData;
+  let restored = 0;
+  
+  try {
+    showToast('Restoring backup...');
+    
+    // Restore transactions
+    for (const txn of transactions) {
+      const data = {
+        userId: currentUser.uid,
+        date: txn.date,
+        type: txn.type,
+        category: txn.category,
+        serviceAmount: txn.serviceAmount,
+        tipAmount: txn.tipAmount,
+        tipMethod: txn.tipMethod,
+        paymentMethod: txn.paymentMethod,
+        notes: txn.notes,
+        amount: txn.type === 'EXPENSE' ? txn.serviceAmount : undefined,
+        createdAt: firebase.firestore.Timestamp.now()
+      };
+      
+      const docRef = await firestore.collection('users').doc(currentUser.uid).collection('transactions').add(data);
+      await db.transactions.put({ id: docRef.id, ...data });
+      restored++;
+    }
+    
+    // Restore monthly expenses
+    for (const exp of monthlyExpenses) {
+      const data = {
+        userId: currentUser.uid,
+        year: exp.year,
+        month: exp.month,
+        category: exp.category,
+        amount: exp.amount,
+        notes: exp.notes,
+        createdAt: firebase.firestore.Timestamp.now()
+      };
+      
+      const docRef = await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').add(data);
+      await db.monthlyExpenses.put({ id: docRef.id, ...data });
+      restored++;
+    }
+    
+    showToast(`Restored ${restored} items from backup!`);
+    
+    // Reset
+    restoreData = null;
+    document.getElementById('restore-status').style.display = 'none';
+    document.getElementById('backup-file-input').value = '';
+    
+    // Refresh current view
+    if (state.currentView === 'daily') renderDailyView();
+    else if (state.currentView === 'monthly') renderMonthlyView();
+    
+  } catch (err) {
+    console.error('Error restoring backup:', err);
+    showToast('Error restoring backup');
+  }
+}
+
+function cancelRestore() {
+  restoreData = null;
+  document.getElementById('restore-status').style.display = 'none';
+  document.getElementById('backup-file-input').value = '';
+  showToast('Restore cancelled');
+}
 
 // ============================================================
 // CSV IMPORT FUNCTIONALITY
