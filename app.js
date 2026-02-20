@@ -2152,45 +2152,58 @@ function parseBackupCSV(text) {
     if (!line) continue;
     
     // Check for section headers
-    if (line === 'Monthly Expenses:') {
+    if (line === 'Monthly Expenses:' || line.startsWith('Monthly Expenses')) {
       currentSection = 'monthly';
       continue;
     }
     
-    const values = line.split(',').map(v => v.trim());
+    // Split by comma, but be careful with empty fields
+    const values = line.split(',');
     
     if (currentSection === 'transactions') {
-      if (line.startsWith('Date,Type,Category')) {
+      if (line.startsWith('Date,Type,Category') || line.startsWith('Date,')) {
         txnHeaders = values;
         continue;
       }
       
       if (txnHeaders.length > 0 && values.length >= 4) {
-        transactions.push({
-          date: values[0],
-          type: values[1],
-          category: values[2],
+        // Parse transaction
+        const txn = {
+          date: (values[0] || '').trim(),
+          type: (values[1] || '').trim(),
+          category: (values[2] || '').trim(),
           serviceAmount: parseFloat(values[3]) || 0,
           tipAmount: parseFloat(values[4]) || 0,
-          tipMethod: values[5] || '',
-          paymentMethod: values[6] || '',
-          notes: values[7] || ''
-        });
+          tipMethod: (values[5] || '').trim(),
+          paymentMethod: (values[6] || '').trim(),
+          notes: (values[7] || '').trim()
+        };
+        
+        // Only add if has required fields
+        if (txn.date && txn.type) {
+          transactions.push(txn);
+        }
       }
     } else if (currentSection === 'monthly') {
-      if (line.startsWith('Year,Month,Category')) {
+      if (line.startsWith('Year,Month,Category') || line.startsWith('Year,')) {
         expHeaders = values;
         continue;
       }
       
       if (expHeaders.length > 0 && values.length >= 4) {
-        monthlyExpenses.push({
-          year: parseInt(values[0]),
-          month: parseInt(values[1]),
-          category: values[2],
+        // Parse monthly expense
+        const exp = {
+          year: parseInt(values[0]) || 0,
+          month: parseInt(values[1]) || 0,
+          category: (values[2] || '').trim(),
           amount: parseFloat(values[3]) || 0,
-          notes: values[4] || ''
-        });
+          notes: (values[4] || '').trim()
+        };
+        
+        // Only add if has required fields
+        if (exp.year > 0 && exp.month > 0) {
+          monthlyExpenses.push(exp);
+        }
       }
     }
   }
@@ -2233,49 +2246,67 @@ async function executeRestore() {
   
   const { transactions, monthlyExpenses } = restoreData;
   let restored = 0;
+  let errors = 0;
   
   try {
     showToast('Restoring backup...');
     
     // Restore transactions
     for (const txn of transactions) {
-      const data = {
-        userId: currentUser.uid,
-        date: txn.date,
-        type: txn.type,
-        category: txn.category,
-        serviceAmount: txn.serviceAmount,
-        tipAmount: txn.tipAmount,
-        tipMethod: txn.tipMethod,
-        paymentMethod: txn.paymentMethod,
-        notes: txn.notes,
-        amount: txn.type === 'EXPENSE' ? txn.serviceAmount : undefined,
-        createdAt: firebase.firestore.Timestamp.now()
-      };
-      
-      const docRef = await firestore.collection('users').doc(currentUser.uid).collection('transactions').add(data);
-      await db.transactions.put({ id: docRef.id, ...data });
-      restored++;
+      try {
+        // Build data object based on transaction type
+        const data = {
+          userId: currentUser.uid,
+          date: txn.date,
+          type: txn.type,
+          category: txn.category || '',
+          notes: txn.notes || '',
+          createdAt: firebase.firestore.Timestamp.now()
+        };
+        
+        // Add fields based on type
+        if (txn.type === 'INCOME') {
+          data.serviceAmount = txn.serviceAmount || 0;
+          data.tipAmount = txn.tipAmount || 0;
+          data.tipMethod = txn.tipMethod || '';
+          data.paymentMethod = txn.paymentMethod || '';
+        } else if (txn.type === 'EXPENSE' || txn.type === 'DAILY_EXPENSE') {
+          data.amount = txn.serviceAmount || 0;
+          data.paymentMethod = txn.paymentMethod || '';
+        }
+        
+        const docRef = await firestore.collection('users').doc(currentUser.uid).collection('transactions').add(data);
+        await db.transactions.put({ id: docRef.id, ...data });
+        restored++;
+      } catch (err) {
+        console.error('Error restoring transaction:', txn, err);
+        errors++;
+      }
     }
     
     // Restore monthly expenses
     for (const exp of monthlyExpenses) {
-      const data = {
-        userId: currentUser.uid,
-        year: exp.year,
-        month: exp.month,
-        category: exp.category,
-        amount: exp.amount,
-        notes: exp.notes,
-        createdAt: firebase.firestore.Timestamp.now()
-      };
-      
-      const docRef = await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').add(data);
-      await db.monthlyExpenses.put({ id: docRef.id, ...data });
-      restored++;
+      try {
+        const data = {
+          userId: currentUser.uid,
+          year: exp.year,
+          month: exp.month,
+          category: exp.category || '',
+          amount: exp.amount || 0,
+          notes: exp.notes || '',
+          createdAt: firebase.firestore.Timestamp.now()
+        };
+        
+        const docRef = await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').add(data);
+        await db.monthlyExpenses.put({ id: docRef.id, ...data });
+        restored++;
+      } catch (err) {
+        console.error('Error restoring monthly expense:', exp, err);
+        errors++;
+      }
     }
     
-    showToast(`Restored ${restored} items from backup!`);
+    showToast(`Restored ${restored} items from backup!${errors > 0 ? ` (${errors} errors)` : ''}`);
     
     // Reset
     restoreData = null;
@@ -2285,10 +2316,11 @@ async function executeRestore() {
     // Refresh current view
     if (state.currentView === 'daily') renderDailyView();
     else if (state.currentView === 'monthly') renderMonthlyView();
+    else navigate('daily');
     
   } catch (err) {
     console.error('Error restoring backup:', err);
-    showToast('Error restoring backup');
+    showToast(`Error restoring backup: ${err.message}`);
   }
 }
 
