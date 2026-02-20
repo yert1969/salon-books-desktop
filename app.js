@@ -2440,12 +2440,25 @@ function showImportPreview(data) {
   const checkCount = data.filter(d => d.payment_method === 'Check/Cash').length;
   
   const totalIncome = data.reduce((sum, d) => {
-    const amount = parseFloat(d.square_amount || d.estimated_price || 0);
+    // Handle empty strings and invalid values
+    let amount = 0;
+    if (d.square_amount && d.square_amount !== '') {
+      amount = parseFloat(d.square_amount);
+    } else if (d.estimated_price && d.estimated_price !== '') {
+      amount = parseFloat(d.estimated_price);
+    }
+    // Skip if NaN
+    if (isNaN(amount)) amount = 0;
     return sum + amount;
   }, 0);
   
   const totalTips = data.reduce((sum, d) => {
-    const tip = parseFloat(d.square_tip || 0);
+    let tip = 0;
+    if (d.square_tip && d.square_tip !== '') {
+      tip = parseFloat(d.square_tip);
+    }
+    // Skip if NaN
+    if (isNaN(tip)) tip = 0;
     return sum + tip;
   }, 0);
   
