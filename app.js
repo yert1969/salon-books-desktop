@@ -1,503 +1,303 @@
-// ================================================================
-//  SALON BOOKS — Main Application Logic
-//  Data layer: Firebase Firestore  |  Auth: Google Sign-In
-// ================================================================
+// ============================================================
+// MANE FRAME SALON - DESKTOP APP (FULL FEATURED)
+// ============================================================
 
-'use strict';
-
-// ----------------------------------------------------------------
-// 1. FIREBASE INITIALIZATION
-// ----------------------------------------------------------------
-
+// Firebase Configuration
 const firebaseConfig = {
-  apiKey:            "AIzaSyAQ4HdSBoCDFe5I3k-aWXMCO-98N_44Cso",
-  authDomain:        "mane-frame-salon.firebaseapp.com",
-  projectId:         "mane-frame-salon",
-  storageBucket:     "mane-frame-salon.firebasestorage.app",
-  messagingSenderId: "261521689074",
-  appId:             "1:261521689074:web:7d095aa53fd87301d8036b",
+  apiKey: "AIzaSyAQ4HdSBoCDFe5I3k-aWXMCO-98N_44Cso",
+  authDomain: "mane-frame-salon.firebaseapp.com",
+  projectId: "mane-frame-salon",
+  storageBucket: "mane-frame-salon.firebasestorage.app",
+  messagingSenderId: "420265936690",
+  appId: "1:420265936690:web:2c4b5b0a2e8769f2f8e61d"
 };
 
 firebase.initializeApp(firebaseConfig);
-
-const auth      = firebase.auth();
+const auth = firebase.auth();
 const firestore = firebase.firestore();
 
-// Enable offline persistence so the app works without a network
-firestore.enablePersistence({ synchronizeTabs: true })
-  .catch(err => {
-    if (err.code === 'failed-precondition') {
-      console.warn('Firestore persistence: multiple tabs open.');
-    } else if (err.code === 'unimplemented') {
-      console.warn('Firestore persistence not available in this browser.');
-    }
-  });
+// IndexedDB (Dexie) for local cache
+const db = new Dexie('ManeFrameDesktop');
+db.version(1).stores({
+  transactions: 'id, userId, date, type, category',
+  monthlyExpenses: 'id, userId, year, month, category',
+  renters: 'id, userId, name',
+  categories: 'id, userId, type'
+});
 
-// ----------------------------------------------------------------
-// 2. AUTH STATE & CURRENT USER
-// ----------------------------------------------------------------
-
-// Holds the currently signed-in Firebase user (or null)
+// Global State
 let currentUser = null;
-
-// Returns a Firestore CollectionReference scoped to the signed-in user.
-// Called lazily — only when an actual DB operation runs, after auth.
-function userCol(name) {
-  if (!currentUser) throw new Error('Not authenticated — cannot access DB.');
-  return firestore.collection('users').doc(currentUser.uid).collection(name);
-}
-
-// ----------------------------------------------------------------
-// 3. DB COMPATIBILITY SHIM  (drop-in Dexie replacement)
-//
-// Exposes a Dexie-like API so all existing app code works unchanged:
-//   db.transactions.add(record)
-//   db.transactions.where('date').equals(date).toArray()
-//   db.settings.get('pin')
-//   db.settings.put({key, value})
-//   db.transaction('rw', ...tables, fn)
-// ----------------------------------------------------------------
-
-// Converts a Firestore DocumentSnapshot into a plain object with id field.
-function docToObj(doc) {
-  if (!doc.exists) return undefined;
-  return { ...doc.data(), id: doc.id };
-}
-
-// Converts a Firestore QuerySnapshot into an array of plain objects.
-function snapToArr(snap) {
-  return snap.docs.map(d => ({ ...d.data(), id: d.id }));
-}
-
-// Creates a table wrapper for a Firestore collection.
-function makeTable(colName) {
-  // Lazy accessor — resolved at call time so currentUser is always set
-  const col = () => userCol(colName);
-
-  return {
-    // ---- Read all ----
-    async toArray() {
-      const snap = await col().get();
-      return snapToArr(snap);
-    },
-
-    // ---- Read one by Firestore doc ID ----
-    async get(id) {
-      const doc = await col().doc(String(id)).get();
-      return docToObj(doc);
-    },
-
-    // ---- Insert (returns new string ID) ----
-    async add(data) {
-      const ref = await col().add(data);
-      return ref.id;
-    },
-
-    // ---- Update fields on existing doc ----
-    async update(id, changes) {
-      await col().doc(String(id)).update(changes);
-    },
-
-    // ---- Delete a doc ----
-    async delete(id) {
-      await col().doc(String(id)).delete();
-    },
-
-    // ---- Delete all docs (used by restore) ----
-    async clear() {
-      const snap = await col().get();
-      const batch = firestore.batch();
-      snap.docs.forEach(d => batch.delete(d.ref));
-      await batch.commit();
-    },
-
-    // ---- Bulk insert (used by restore) ----
-    async bulkAdd(records) {
-      const CHUNK = 499; // Firestore batch limit is 500 ops
-      for (let i = 0; i < records.length; i += CHUNK) {
-        const batch = firestore.batch();
-        records.slice(i, i + CHUNK).forEach(r => {
-          batch.set(col().doc(), r); // auto-ID
-        });
-        await batch.commit();
-      }
-    },
-
-    // ---- Query builder — mirrors Dexie's .where().equals() API ----
-    where(field) {
-      return {
-        equals(value) {
-          const q = col().where(field, '==', value);
-
-          return {
-            // Return all matching docs
-            async toArray() {
-              const snap = await q.get();
-              return snapToArr(snap);
-            },
-
-            // Return first matching doc
-            async first() {
-              const snap = await q.limit(1).get();
-              if (snap.empty) return undefined;
-              return docToObj(snap.docs[0]);
-            },
-
-            // Apply an additional client-side filter, then return first match.
-            // Used for saveRentPayment() to check if payment exists for a week.
-            filter(fn) {
-              return {
-                async first() {
-                  const snap = await q.get();
-                  return snapToArr(snap).find(fn);
-                },
-              };
-            },
-
-            // Reverse order + limit — used for renter payment history.
-            // Tries a Firestore server-side sort; falls back to client-side.
-            reverse() {
-              return {
-                limit(n) {
-                  return {
-                    async toArray() {
-                      try {
-                        const snap = await q.orderBy('weekStart', 'desc').limit(n).get();
-                        return snapToArr(snap);
-                      } catch (_) {
-                        // No composite index yet — sort client-side
-                        const snap = await q.get();
-                        return snapToArr(snap)
-                          .sort((a, b) => (b.weekStart > a.weekStart ? 1 : -1))
-                          .slice(0, n);
-                      }
-                    },
-                  };
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  };
-}
-
-// ---- Settings table (special: key is the document ID) ----
-const settingsTable = {
-  async get(key) {
-    try {
-      const doc = await userCol('settings').doc(key).get();
-      if (!doc.exists) return undefined;
-      return { key: doc.id, ...doc.data() };
-    } catch(_) { return undefined; }
-  },
-
-  // Dexie put({key, value}) → Firestore set at settings/{key}
-  async put(obj) {
-    const { key } = obj;
-    await userCol('settings').doc(key).set(obj);
-  },
-
-  async delete(key) {
-    await userCol('settings').doc(key).delete();
-  },
-
-  async toArray() {
-    const snap = await userCol('settings').get();
-    return snap.docs.map(d => ({ key: d.id, ...d.data() }));
-  },
-
-  async clear() {
-    const snap = await userCol('settings').get();
-    const batch = firestore.batch();
-    snap.docs.forEach(d => batch.delete(d.ref));
-    await batch.commit();
-  },
-
-  async bulkAdd(records) {
-    const batch = firestore.batch();
-    records.forEach(r => {
-      const ref = userCol('settings').doc(r.key);
-      batch.set(ref, r);
-    });
-    await batch.commit();
-  },
-};
-
-// ---- The db object exposed to all app code ----
-const db = {
-  transactions:    makeTable('transactions'),
-  dailySummary:    makeTable('dailySummary'),
-  monthlyExpenses: makeTable('monthlyExpenses'),
-  renters:         makeTable('renters'),
-  rentPayments:    makeTable('rentPayments'),
-  settings:        settingsTable,
-
-  // Restore uses db.transaction('rw', ...tables, fn).
-  // Firestore handles its own atomicity; we just call fn().
-  async transaction(_mode, ...args) {
-    const fn = args[args.length - 1];
-    return fn();
-  },
-};
-
-// ----------------------------------------------------------------
-// 4. GOOGLE SIGN-IN / SIGN-OUT
-// ----------------------------------------------------------------
-
-async function signInWithGoogle() {
-  const provider = new firebase.auth.GoogleAuthProvider();
-  try {
-    await auth.signInWithPopup(provider);
-    // onAuthStateChanged below will fire and boot the app
-  } catch (err) {
-    if (err.code !== 'auth/popup-closed-by-user') {
-      showToast('Sign-in failed — please try again');
-      console.error(err);
-    }
+let state = {
+  currentView: 'daily',
+  selectedDate: todayStr(),
+  selectedMonth: new Date().getMonth() + 1,
+  selectedYear: new Date().getFullYear(),
+  reportType: 'weekly',
+  categories: {
+    INCOME: ['Haircut', 'Color', 'Highlights', 'Perm', 'Extensions', 'Treatment', 'Blowout', 'Styling', 'Other'],
+    DAILY_EXPENSE: ['Products', 'Supplies', 'Lunch', 'Gas', 'Parking', 'Other'],
+    MONTHLY_EXPENSE: ['Booth Rent', 'Insurance', 'License Renewal', 'Marketing', 'Equipment', 'Other']
   }
-}
-
-async function signOutUser() {
-  if (!confirm('Sign out of Mane Frame?')) return;
-  await auth.signOut();
-  // onAuthStateChanged fires → shows login screen
-}
-
-// ----------------------------------------------------------------
-// 5. APP STATE
-// ----------------------------------------------------------------
-
-const state = {
-  currentView:       'daily',
-  selectedDate:      todayStr(),
-  selectedMonth:     new Date().getMonth() + 1,
-  selectedYear:      new Date().getFullYear(),
-  reportType:        'daily',
-  pinBuffer:         '',
-  pinEnabled:        false,
-  rentersWeekStart:  null,
-  showRentersTab:    false,  // Updated by updateRentersTabVisibility() on boot
-  categories:        { INCOME: [], DAILY_EXPENSE: [], MONTHLY_EXPENSE: [] },
 };
 
-// ----------------------------------------------------------------
-// 6. UTILITY FUNCTIONS
-// ----------------------------------------------------------------
+// ============================================================
+// UTILITY FUNCTIONS
+// ============================================================
 
 function todayStr() {
-  return new Date().toISOString().split('T')[0];
-}
-
-function formatDateDisplay(dateStr) {
-  const d = new Date(dateStr + 'T12:00:00');
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
-}
-
-function formatDateShort(dateStr) {
-  const d = new Date(dateStr + 'T12:00:00');
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-}
-
-function fmt(amount) {
-  if (amount === null || amount === undefined || isNaN(amount)) return '$0.00';
-  return '$' + parseFloat(amount).toFixed(2);
-}
-
-function monthName(num) {
-  return new Date(2000, num - 1, 1).toLocaleString('en-US', { month: 'long' });
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function addDays(dateStr, days) {
-  const d = new Date(dateStr + 'T12:00:00');
+  const d = new Date(dateStr + 'T00:00:00');
   d.setDate(d.getDate() + days);
-  return d.toISOString().split('T')[0];
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function getWeekStart(dateStr) {
-  const d   = new Date(dateStr + 'T12:00:00');
+  const d = new Date(dateStr + 'T00:00:00');
   const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().split('T')[0];
+  const diff = d.getDate() - day;
+  d.setDate(diff);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const dayStr = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${dayStr}`;
+}
+
+function fmt(num) {
+  return '$' + Number(num).toFixed(2);
+}
+
+function monthName(m) {
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  return months[m - 1] || '';
+}
+
+function monthNameShort(m) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[m - 1] || '';
 }
 
 function showToast(msg) {
   const toast = document.getElementById('toast');
   toast.textContent = msg;
   toast.classList.remove('hidden');
-  setTimeout(() => toast.classList.add('hidden'), 2200);
+  setTimeout(() => toast.classList.add('hidden'), 3000);
 }
 
-// ----------------------------------------------------------------
-// 7. CATEGORY MANAGEMENT
-// ----------------------------------------------------------------
+function openModal(html) {
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.remove('hidden');
+  document.getElementById('modal').classList.remove('hidden');
+}
 
-function _defaultCategoryMap() {
-  return {
-    INCOME: [
-      'Haircut', 'Color', 'Highlights', 'Blowout', 'Treatment',
-      'Nails', 'Waxing', 'Retail Product', 'Other Service',
-    ],
-    DAILY_EXPENSE: [
-      'Supplies', 'Products', 'Tools/Equipment', 'Advertising',
-      'Education', 'Meals', 'Employee Pay', 'Misc Daily',
-    ],
-    MONTHLY_EXPENSE: [
-      'Rent', 'Electric', 'Water', 'Gas', 'Insurance',
-      'Cleaning Service', 'Booking Software', 'Phone',
-      'Marketing', 'Misc Monthly',
-    ],
-  };
+function closeModal() {
+  document.getElementById('modal-overlay').classList.add('hidden');
+  document.getElementById('modal').classList.add('hidden');
+  document.getElementById('modal-content').innerHTML = '';
+}
+
+function confirmDialog(message, title = 'Confirm') {
+  return new Promise((resolve) => {
+    openModal(`
+      <h2 class="modal-title">${title}</h2>
+      <div style="font-size:15px;line-height:1.6;color:var(--text);margin:20px 0;white-space:pre-line;">${message}</div>
+      <div style="display:flex;gap:8px;margin-top:24px;">
+        <button class="btn-secondary" style="flex:1;" onclick="window._confirmResolve(false)">Cancel</button>
+        <button class="btn-danger" style="flex:1;" onclick="window._confirmResolve(true)">Delete</button>
+      </div>
+    `);
+    
+    window._confirmResolve = (result) => {
+      closeModal();
+      delete window._confirmResolve;
+      resolve(result);
+    };
+  });
+}
+
+// ============================================================
+// AUTHENTICATION
+// ============================================================
+
+auth.onAuthStateChanged(async user => {
+  console.log('Auth state changed:', user ? user.email : 'signed out');
+  
+  if (user) {
+    currentUser = user;
+    
+    const loginScreen = document.getElementById('login-screen');
+    const appScreen = document.getElementById('app');
+    
+    loginScreen.classList.add('hidden');
+    loginScreen.style.display = 'none';
+    
+    appScreen.classList.remove('hidden');
+    appScreen.style.display = 'block';
+    
+    document.getElementById('user-email').textContent = user.email;
+    document.getElementById('header-date').textContent = new Date().toLocaleDateString('en-US', { 
+      weekday: 'short', 
+      year: 'numeric', 
+      month: 'short', 
+      day: 'numeric' 
+    });
+    
+    console.log('Syncing data...');
+    await syncFromFirestore();
+    console.log('Loading categories...');
+    await loadCategories();
+    console.log('Rendering daily view...');
+    await navigate('daily');
+    console.log('App ready!');
+  } else {
+    currentUser = null;
+    document.getElementById('login-screen').classList.remove('hidden');
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('app').style.display = 'none';
+  }
+});
+
+document.getElementById('google-signin-btn').addEventListener('click', async () => {
+  const provider = new firebase.auth.GoogleAuthProvider();
+  try {
+    await auth.signInWithPopup(provider);
+  } catch (err) {
+    showToast('Sign in failed: ' + err.message);
+  }
+});
+
+document.getElementById('sign-out-btn').addEventListener('click', async () => {
+  await auth.signOut();
+});
+
+// ============================================================
+// DATA SYNC
+// ============================================================
+
+async function syncFromFirestore() {
+  if (!currentUser) return;
+  
+  const uid = currentUser.uid;
+  
+  try {
+    const txnSnapshot = await firestore.collection('users').doc(uid).collection('transactions').get();
+    for (const doc of txnSnapshot.docs) {
+      await db.transactions.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${txnSnapshot.docs.length} transactions`);
+    
+    const expSnapshot = await firestore.collection('users').doc(uid).collection('monthlyExpenses').get();
+    for (const doc of expSnapshot.docs) {
+      await db.monthlyExpenses.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${expSnapshot.docs.length} monthly expenses`);
+    
+    const renterSnapshot = await firestore.collection('users').doc(uid).collection('renters').get();
+    for (const doc of renterSnapshot.docs) {
+      await db.renters.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${renterSnapshot.docs.length} renters`);
+  } catch (err) {
+    console.error('Sync error:', err);
+  }
 }
 
 async function loadCategories() {
+  if (!currentUser) return;
+  
   try {
-    const saved = await db.settings.get('categories');
-    if (saved?.value) {
-      const parsed = JSON.parse(saved.value);
+    const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
+    if (doc.exists) {
+      const firestoreCategories = doc.data();
       state.categories = {
-        INCOME:          parsed.INCOME?.length          ? parsed.INCOME          : _defaultCategoryMap().INCOME,
-        DAILY_EXPENSE:   parsed.DAILY_EXPENSE?.length   ? parsed.DAILY_EXPENSE   : _defaultCategoryMap().DAILY_EXPENSE,
-        MONTHLY_EXPENSE: parsed.MONTHLY_EXPENSE?.length ? parsed.MONTHLY_EXPENSE : _defaultCategoryMap().MONTHLY_EXPENSE,
+        INCOME: firestoreCategories.INCOME || state.categories.INCOME,
+        DAILY_EXPENSE: firestoreCategories.DAILY_EXPENSE || state.categories.DAILY_EXPENSE,
+        MONTHLY_EXPENSE: firestoreCategories.MONTHLY_EXPENSE || state.categories.MONTHLY_EXPENSE
       };
-    } else {
-      state.categories = _defaultCategoryMap();
-      await saveCategories();
     }
-  } catch (e) {
-    console.warn('loadCategories error:', e);
-    state.categories = _defaultCategoryMap();
-    try { await saveCategories(); } catch (_) { /* best effort */ }
+    console.log('Categories loaded');
+  } catch (err) {
+    console.error('Category load error:', err);
   }
 }
 
 async function saveCategories() {
-  await db.settings.put({ key: 'categories', value: JSON.stringify(state.categories) });
-}
-
-function categoryOptions(type) {
-  return (state.categories[type] || [])
-    .map(name => `<option value="${name}">${name}</option>`)
-    .join('');
-}
-
-// ----------------------------------------------------------------
-// 8. NAVIGATION
-// ----------------------------------------------------------------
-
-/**
- * Updates whether the Renters tab is shown.
- * Auto-hides if no renters exist, unless manually overridden in Settings.
- */
-async function updateRentersTabVisibility() {
-  // Check for manual override first
-  const override = await db.settings.get('showRentersTab');
-  
-  if (override?.value !== undefined) {
-    // Manual override exists — respect it
-    state.showRentersTab = override.value === 'true';
-  } else {
-    // No override — auto-detect based on renter data
-    const allRenters = await db.renters.toArray();
-    state.showRentersTab = allRenters.length > 0;
-  }
-}
-
-/**
- * Wraps render functions with error handling to prevent blank pages
- */
-async function safeRender(renderFn, viewName) {
+  if (!currentUser) return;
   try {
-    await renderFn();
-    } catch (err) {
-    console.error(`Error rendering ${viewName}:`, err);
-    const content = document.getElementById('app-content');
-    if (content) {
-      content.innerHTML = `
-        <div style="padding:40px 20px;text-align:center;">
-          <div style="font-size:48px;margin-bottom:16px;">⚠️</div>
-          <div style="font-size:18px;font-weight:600;color:var(--danger);margin-bottom:8px;">
-            Error loading ${viewName}
-          </div>
-          <div style="font-size:14px;color:var(--text-muted);margin-bottom:20px;">
-            ${err.message || 'Unknown error'}
-          </div>
-          <button class="btn-primary" onclick="navigate('${state.currentView}')">
-            Try Again
-          </button>
-          <button class="btn-secondary" onclick="location.reload()" style="margin-left:8px;">
-            Reload App
-          </button>
-        </div>
-      `;
-    }
+    await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').set(state.categories);
+    showToast('Categories saved');
+  } catch (err) {
+    console.error('Save categories error:', err);
+    showToast('Failed to save categories');
   }
 }
 
-function navigate(view) {
+// ============================================================
+// NAVIGATION
+// ============================================================
+
+async function navigate(view) {
+  console.log('Navigating to:', view);
   state.currentView = view;
   
-  // Update all nav buttons
-  ['daily', 'monthly', 'renters', 'reports', 'settings'].forEach(v => {
-    const btn = document.getElementById('nav-' + v);
-    if (btn) {
-      btn.classList.toggle('active', v === view);
-    }
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    btn.classList.remove('active');
   });
+  const navBtn = document.querySelector(`[data-view="${view}"]`);
+  if (navBtn) navBtn.classList.add('active');
   
-  // Always update renters tab visibility when navigating
-  const rentersBtn = document.getElementById('nav-renters');
-  if (rentersBtn) {
-    const shouldShow = state.showRentersTab;
-      rentersBtn.style.display = shouldShow ? 'flex' : 'none';
-  } else {
-    console.warn('Renters button not found in DOM');
+  try {
+    switch(view) {
+      case 'daily': await renderDailyView(); break;
+      case 'monthly': await renderMonthlyView(); break;
+      case 'renters': await renderRentersView(); break;
+      case 'reports': await renderReportsView(); break;
+      case 'settings': await renderSettingsView(); break;
+    }
+    console.log('View rendered:', view);
+  } catch (err) {
+    console.error('Render error:', err);
+    document.getElementById('content').innerHTML = `
+      <div class="card" style="text-align:center; padding:40px;">
+        <h2 style="color:var(--danger);">Error Loading View</h2>
+        <p>${err.message}</p>
+        <p style="color:var(--text-muted);font-size:12px;">${err.stack}</p>
+        <button class="btn-primary" onclick="location.reload()">Reload</button>
+      </div>
+    `;
   }
-  
-  const titles = {
-    daily:    'Daily Log',
-    monthly:  'Monthly Expenses',
-    renters:  'Booth Renters',
-    reports:  'Reports',
-    settings: 'Settings',
-  };
-  document.getElementById('view-title').textContent = titles[view] || '';
-  
-  const views = {
-    daily:    () => safeRender(renderDailyView, 'Daily Log'),
-    monthly:  () => safeRender(renderMonthlyView, 'Monthly Expenses'),
-    renters:  () => safeRender(renderRentersView, 'Booth Renters'),
-    reports:  () => safeRender(renderReportsView, 'Reports'),
-    settings: () => safeRender(renderSettingsView, 'Settings'),
-  };
-  if (views[view]) views[view]();
 }
 
-// ----------------------------------------------------------------
-// 9. DAILY VIEW
-// ----------------------------------------------------------------
+// ============================================================
+// DAILY VIEW
+// ============================================================
 
 async function renderDailyView() {
-  const content = document.getElementById('app-content');
-  const hdr = document.getElementById('header-actions');
-  hdr.innerHTML = '';
-
-  const txns    = await db.transactions.where('date').equals(state.selectedDate).toArray();
-  const summary = await db.dailySummary.where('date').equals(state.selectedDate).first();
-
-  const income   = txns.filter(t => t.type === 'INCOME');
-  const expenses = txns.filter(t => t.type === 'EXPENSE');
-
-  const totalService = income.reduce((s, t) => s + (t.serviceAmount || 0), 0);
-  const totalTips    = income.reduce((s, t) => s + (t.tipAmount    || 0), 0);
-  const totalIncome  = totalService + totalTips;
-  const totalExp     = expenses.reduce((s, t) => s + (t.amount || 0), 0);
-  const net          = totalIncome - totalExp;
-
+  const content = document.getElementById('content');
+  
+  const transactions = await db.transactions.where('date').equals(state.selectedDate).toArray();
+  
+  const income = transactions.filter(t => t.type === 'INCOME');
+  const expenses = transactions.filter(t => t.type === 'EXPENSE');
+  
+  const totalIncome = income.reduce((sum, t) => sum + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+  const totalExpenses = expenses.reduce((sum, t) => sum + (t.amount || 0), 0);
+  const net = totalIncome - totalExpenses;
+  
+  const dateObj = new Date(state.selectedDate + 'T00:00:00');
+  const dateDisplay = dateObj.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const isToday = state.selectedDate === todayStr();
-
+  
   // Calculate comparison stats (only for today)
   let comparisonHTML = '';
   if (isToday) {
@@ -509,7 +309,7 @@ async function renderDailyView() {
       .filter(t => t.date === yesterday && t.type === 'INCOME')
       .reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
     
-    // Last Week (same day of week - this makes sense for salons!)
+    // Last Week (same day of week)
     const lastWeek = addDays(todayStr(), -7);
     const lastWeekIncome = allTxns
       .filter(t => t.date === lastWeek && t.type === 'INCOME')
@@ -532,8 +332,8 @@ async function renderDailyView() {
       const color = change > 0 ? '#2D7A4C' : change < 0 ? '#C13838' : '#999';
       const percent = Math.abs(change).toFixed(0);
       return `
-        <div style="color:${color};">
-          <span class="comparison-arrow">${arrow}</span><span class="comparison-percent">${percent}%</span>
+        <div style="color:${color}; font-size:20px; font-weight:600;">
+          <span>${arrow}</span> <span>${percent}%</span>
         </div>
       `;
     };
@@ -544,251 +344,258 @@ async function renderDailyView() {
     const dayName = dayNames[todayDayOfWeek];
     
     comparisonHTML = `
-      <div class="comparison-cards">
-        <div class="comparison-card">
-          <div class="comparison-label">vs Yesterday</div>
-          <div class="comparison-value">${formatChange(vsYesterday, yesterdayIncome)}</div>
-          <div class="comparison-amount">${fmt(yesterdayIncome)}</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:24px;">
+        <div class="summary-card">
+          <div class="summary-label">vs Yesterday</div>
+          ${formatChange(vsYesterday, yesterdayIncome)}
+          <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${fmt(yesterdayIncome)}</div>
         </div>
-        <div class="comparison-card">
-          <div class="comparison-label">vs Last ${dayName}</div>
-          <div class="comparison-value">${formatChange(vsLastWeek, lastWeekIncome)}</div>
-          <div class="comparison-amount">${fmt(lastWeekIncome)}</div>
+        <div class="summary-card">
+          <div class="summary-label">vs Last ${dayName}</div>
+          ${formatChange(vsLastWeek, lastWeekIncome)}
+          <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${fmt(lastWeekIncome)}</div>
         </div>
       </div>
     `;
   }
-
-  const lastBackupSetting = await db.settings.get('lastBackup');
-  let backupNudge = '';
-  if (isToday) {
-    const lastBackupDate = lastBackupSetting?.value;
-    const daysOverdue = lastBackupDate
-      ? Math.floor((new Date() - new Date(lastBackupDate + 'T12:00:00')) / 86400000)
-      : 999;
-    if (daysOverdue >= 30) {
-      backupNudge = `
-        <div class="backup-nudge" onclick="navigate('settings')">
-          💾 Export a local backup — ${daysOverdue >= 999 ? "no local backup yet" : `last export ${daysOverdue} days ago`}
-          <span style="margin-left:6px;opacity:.7;">›</span>
-        </div>`;
-    }
-  }
-
+  
   content.innerHTML = `
-    ${backupNudge}
-
-    <div class="daily-date-bar">
-      <button class="date-nav-btn" onclick="changeDate(-1)">‹</button>
-      <div class="current-date" onclick="openDatePicker()">${isToday ? 'Today' : formatDateDisplay(state.selectedDate)}</div>
-      <button class="date-nav-btn" onclick="changeDate(1)" ${isToday ? 'disabled style="opacity:0.3"' : ''}>›</button>
+    <div class="page-header">
+      <h2 class="page-title">Daily Log</h2>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
+        <button class="btn-secondary" onclick="changeDate(-1)">← Prev</button>
+        <input type="date" class="form-input" style="width:auto;" value="${state.selectedDate}" onchange="state.selectedDate=this.value; renderDailyView()">
+        <button class="btn-secondary" onclick="changeDate(1)">Next →</button>
+        <button class="btn-secondary" onclick="state.selectedDate=todayStr(); renderDailyView()">Today</button>
+      </div>
+      <p class="page-subtitle">${dateDisplay}</p>
     </div>
-
-    <div class="summary-cards">
-      <div class="summary-card income-card">
+    
+    <div class="summary-grid">
+      <div class="summary-card">
         <div class="summary-label">Income</div>
-        <div class="summary-amount">${fmt(totalIncome)}</div>
-        ${totalTips > 0 ? `<div class="summary-sub">incl. ${fmt(totalTips)} tips</div>` : ''}
+        <div class="summary-amount positive">${fmt(totalIncome)}</div>
       </div>
-      <div class="summary-card expense-card">
+      <div class="summary-card">
         <div class="summary-label">Expenses</div>
-        <div class="summary-amount">${fmt(totalExp)}</div>
+        <div class="summary-amount negative">${fmt(totalExpenses)}</div>
       </div>
-      <div class="summary-card net-card">
+      <div class="summary-card">
         <div class="summary-label">Net</div>
         <div class="summary-amount ${net >= 0 ? 'positive' : 'negative'}">${fmt(net)}</div>
       </div>
     </div>
-
+    
     ${comparisonHTML}
-
-    ${summary ? `
-    <div class="day-summary-card" onclick="openDaySummaryModal()">
-      <div style="display:flex;align-items:center;gap:12px;flex:1;font-size:13px;">
-        <span>👤 ${summary.clientsSeen} clients</span>
-        <span>⏱ ${summary.hoursWorked}h</span>
+    
+    <div class="quick-entry">
+      <div class="quick-entry-title">Quick Add Transaction</div>
+      <div class="quick-entry-grid">
+        <div class="form-group">
+          <label class="form-label">Type</label>
+          <select id="quick-type" class="form-select" onchange="updateQuickForm()">
+            <option value="INCOME">Income</option>
+            <option value="EXPENSE">Expense</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Category</label>
+          <select id="quick-category" class="form-select"></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Amount</label>
+          <input type="number" id="quick-amount" class="form-input" step="0.01" placeholder="0.00">
+        </div>
+        <div class="form-group" id="quick-payment-group">
+          <label class="form-label">Payment</label>
+          <select id="quick-payment" class="form-select">
+            <option value="Cash">Cash</option>
+            <option value="Card">Card</option>
+            <option value="Venmo">Venmo</option>
+            <option value="Zelle">Zelle</option>
+          </select>
+        </div>
+        <button class="btn-primary" onclick="quickAddTransaction()" style="align-self:end;">Add</button>
       </div>
-      <span style="opacity:.5;font-size:12px;">edit ✏</span>
     </div>
-    ` : `
-    <div class="day-summary-card empty" onclick="openDaySummaryModal()">
-      <div style="flex:1;">
-        <div style="font-weight:600;font-size:13px;color:var(--plum);margin-bottom:1px;">
-          📋 Log today's activity
-        </div>
-        <div style="font-size:12px;color:var(--text-muted);">
-          Track clients & hours
-        </div>
-      </div>
-      <span style="font-size:20px;opacity:.3;">+</span>
+    
+    <div class="card">
+      <h3 style="font-size:18px; margin-bottom:16px;">Today's Transactions</h3>
+      ${transactions.length === 0 ? '<p style="text-align:center; color:var(--text-muted); padding:40px;">No transactions yet</p>' : `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Category</th>
+              <th>Amount</th>
+              <th>Payment</th>
+              <th>Notes</th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${transactions.map(t => `
+              <tr>
+                <td>${t.type === 'INCOME' ? '💰 Income' : '💸 Expense'}</td>
+                <td>${t.category || '—'}</td>
+                <td style="font-weight:600; color:${t.type === 'INCOME' ? 'var(--success)' : 'var(--danger)'}">${t.type === 'INCOME' ? fmt((t.serviceAmount || 0) + (t.tipAmount || 0)) : fmt(t.amount || 0)}</td>
+                <td>${t.paymentMethod || '—'}</td>
+                <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.notes || '—'}</td>
+                <td><button class="btn-secondary" style="padding:6px 12px; font-size:12px;" onclick="openEditTransactionModal('${t.id}')">Edit</button></td>
+                <td><button class="btn-danger" style="padding:6px 12px; font-size:12px;" onclick="deleteTransaction('${t.id}')">Delete</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `}
     </div>
-    `}
-
-    <div style="padding: 0 16px 8px;">
-      <div class="section-label">Income</div>
-      ${income.length === 0 ? `
-        <div class="empty-state">
-          <div class="empty-icon">💈</div>
-          <div class="empty-text">No income yet. Tap + below.</div>
-        </div>
-      ` : income.map(t => renderTransactionItem(t)).join('')}
-
-      <div class="section-label" style="margin-top:12px;">Expenses</div>
-      ${expenses.length === 0 ? `
-        <div class="empty-state">
-          <div class="empty-icon">🧾</div>
-          <div class="empty-text">No expenses yet.</div>
-        </div>
-      ` : expenses.map(t => renderTransactionItem(t)).join('')}
-    </div>
-
-    <div class="fab-row">
-      <button class="fab fab-income"  onclick="openAddTransactionModal('INCOME')">
-        <span style="font-size:18px">+</span> Income
-      </button>
-      <button class="fab fab-expense" onclick="openAddTransactionModal('EXPENSE')">
-        <span style="font-size:18px">+</span> Expense
-      </button>
-    </div>
-
-    <div style="height:16px;"></div>
   `;
+  
+  updateQuickForm();
 }
 
-function renderTransactionItem(t) {
-  const isIncome = t.type === 'INCOME';
-  const total    = isIncome ? (t.serviceAmount || 0) + (t.tipAmount || 0) : (t.amount || 0);
-  const sign     = isIncome ? '+' : '-';
-  const colorClass = isIncome ? 'income-amount' : 'expense-amount';
-
-  return `
-    <div class="txn-row">
-      <div class="txn-body" onclick="openEditTransactionModal('${t.id}')">
-        <div class="txn-category">${t.category || '—'} <span style="font-size:11px;color:var(--text-light);font-weight:400;">✏</span></div>
-        <div class="txn-meta">${t.paymentMethod || ''}${t.notes ? ' · ' + t.notes : ''}${isIncome && t.tipAmount > 0 ? ' · tip ' + fmt(t.tipAmount) : ''}</div>
-      </div>
-      <div class="txn-amount-col ${colorClass}" onclick="openEditTransactionModal('${t.id}')">${sign}${fmt(Math.abs(total))}</div>
-      <button class="txn-delete" onclick="deleteTransaction('${t.id}')">✕</button>
-    </div>`;
-}
-
-function openDatePicker() {
-  openModal(`
-    <h2 class="modal-title">Go to Date</h2>
-    <div class="form-group">
-      <input type="date" class="form-input" id="date-picker-val" value="${state.selectedDate}">
-    </div>
-    <button class="btn-submit" onclick="jumpToDate()">Go</button>
-  `);
-}
-
-function jumpToDate() {
-  const v = document.getElementById('date-picker-val').value;
-  if (v) { state.selectedDate = v; closeModal(); renderDailyView(); }
-}
-
-function changeDate(delta) {
-  state.selectedDate = addDays(state.selectedDate, delta);
+function changeDate(days) {
+  state.selectedDate = addDays(state.selectedDate, days);
   renderDailyView();
 }
 
-// ----------------------------------------------------------------
-// 10. TRANSACTION MODALS
-// ----------------------------------------------------------------
+function updateQuickForm() {
+  const typeEl = document.getElementById('quick-type');
+  const categoryEl = document.getElementById('quick-category');
+  const paymentGroup = document.getElementById('quick-payment-group');
+  
+  if (!typeEl || !categoryEl || !paymentGroup) return;
+  
+  const type = typeEl.value;
+  
+  if (!state.categories || !state.categories.INCOME || !state.categories.DAILY_EXPENSE) {
+    console.error('Categories not loaded');
+    return;
+  }
+  
+  const categories = type === 'INCOME' ? state.categories.INCOME : state.categories.DAILY_EXPENSE;
+  categoryEl.innerHTML = categories.map(c => `<option value="${c}">${c}</option>`).join('');
+  
+  paymentGroup.style.display = type === 'INCOME' ? 'block' : 'none';
+}
 
-async function openAddTransactionModal(type) {
-  await loadCategories();
-  const isIncome = type === 'INCOME';
-  const catKey   = isIncome ? 'INCOME' : 'DAILY_EXPENSE';
-  const catOptions = categoryOptions(catKey);
-  const pmOptions = ['Cash','Card','Venmo','Zelle','Check','Other']
-    .map(m => `<option>${m}</option>`).join('');
+async function quickAddTransaction() {
+  const type = document.getElementById('quick-type').value;
+  const category = document.getElementById('quick-category').value;
+  const amount = parseFloat(document.getElementById('quick-amount').value);
+  const payment = document.getElementById('quick-payment').value;
+  
+  if (!amount || amount <= 0) {
+    showToast('Please enter a valid amount');
+    return;
+  }
+  
+  const txn = {
+    userId: currentUser.uid,
+    date: state.selectedDate,
+    type: type,
+    category: category,
+    createdAt: firebase.firestore.Timestamp.now()
+  };
+  
+  if (type === 'INCOME') {
+    txn.serviceAmount = amount;
+    txn.tipAmount = 0;
+    txn.paymentMethod = payment;
+  } else {
+    txn.amount = amount;
+  }
+  
+  const docRef = await firestore.collection('users').doc(currentUser.uid).collection('transactions').add(txn);
+  await db.transactions.put({ id: docRef.id, ...txn });
+  
+  document.getElementById('quick-amount').value = '';
+  showToast('Transaction added');
+  renderDailyView();
+}
 
+async function openEditTransactionModal(id) {
+  const t = await db.transactions.get(id);
+  if (!t) return;
+  
+  const isIncome = t.type === 'INCOME';
+  const catKey = isIncome ? 'INCOME' : 'DAILY_EXPENSE';
+  const catOptions = (state.categories[catKey] || [])
+    .map(name => `<option value="${name}" ${name === t.category ? 'selected' : ''}>${name}</option>`)
+    .join('');
+  
   openModal(`
-    <h2 class="modal-title">+ Add ${isIncome ? 'Income' : 'Expense'}</h2>
-
-    <div class="form-group">
-      <label class="form-label">Date</label>
-      <input type="date" class="form-input" id="txn-date" value="${state.selectedDate}">
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Category</label>
-      <select class="form-select" id="txn-category">
-        <option value="">Select category…</option>
-        ${catOptions}
-      </select>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">${isIncome ? 'Service Amount ($)' : 'Amount ($)'}</label>
-      <input type="number" class="form-input" id="txn-amount" placeholder="0.00" step="0.01" min="0" inputmode="decimal">
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Payment Method</label>
-      <select class="form-select" id="txn-payment">${pmOptions}</select>
-    </div>
-
-    ${isIncome ? `
-    <hr class="form-section-divider">
-    <div class="form-section-label">Tip (optional)</div>
-    <div class="form-row">
+    <h2 class="modal-title">Edit Transaction</h2>
+    <form onsubmit="saveEditTransaction('${id}'); return false;">
       <div class="form-group">
-        <label class="form-label">Tip Amount ($)</label>
-        <input type="number" class="form-input" id="txn-tip" placeholder="0.00" step="0.01" min="0" inputmode="decimal">
+        <label class="form-label">Date</label>
+        <input type="date" id="edit-date" class="form-input" value="${t.date}" required>
       </div>
       <div class="form-group">
-        <label class="form-label">Tip Method</label>
-        <select class="form-select" id="txn-tip-method">
-          <option value="">None</option>
-          <option value="Cash">Cash</option>
-          <option value="Card">Card</option>
-        </select>
+        <label class="form-label">Category</label>
+        <select id="edit-category" class="form-select" required>${catOptions}</select>
       </div>
-    </div>
-    ` : ''}
-
-    <div class="form-group">
-      <label class="form-label">Notes (optional)</label>
-      <input type="text" class="form-input" id="txn-notes" placeholder="e.g. regular client, product used…">
-    </div>
-
-    <button class="btn-submit" onclick="saveTransaction('${type}')">Save Entry</button>
+      ${isIncome ? `
+        <div class="form-group">
+          <label class="form-label">Service Amount</label>
+          <input type="number" id="edit-service" class="form-input" step="0.01" value="${t.serviceAmount || 0}" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Tip Amount</label>
+          <input type="number" id="edit-tip" class="form-input" step="0.01" value="${t.tipAmount || 0}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Payment Method</label>
+          <select id="edit-payment" class="form-select">
+            <option value="Cash" ${t.paymentMethod === 'Cash' ? 'selected' : ''}>Cash</option>
+            <option value="Card" ${t.paymentMethod === 'Card' ? 'selected' : ''}>Card</option>
+            <option value="Venmo" ${t.paymentMethod === 'Venmo' ? 'selected' : ''}>Venmo</option>
+            <option value="Zelle" ${t.paymentMethod === 'Zelle' ? 'selected' : ''}>Zelle</option>
+          </select>
+        </div>
+      ` : `
+        <div class="form-group">
+          <label class="form-label">Amount</label>
+          <input type="number" id="edit-amount" class="form-input" step="0.01" value="${t.amount || 0}" required>
+        </div>
+      `}
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <input type="text" id="edit-notes" class="form-input" value="${t.notes || ''}">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:24px;">
+        <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" style="flex:1;">Save</button>
+      </div>
+    </form>
   `);
 }
 
-async function saveTransaction(type) {
-  const isIncome = type === 'INCOME';
-  const date     = document.getElementById('txn-date').value;
-  const category = document.getElementById('txn-category').value;
-  const amount   = parseFloat(document.getElementById('txn-amount').value) || 0;
-  const payment  = document.getElementById('txn-payment').value;
-  const notes    = document.getElementById('txn-notes').value.trim();
-
-  if (!category) { alert('Please select a category.'); return; }
-  if (amount <= 0) { alert('Please enter an amount greater than zero.'); return; }
-
-  const record = { date, type, category, paymentMethod: payment, notes };
-
+async function saveEditTransaction(id) {
+  const t = await db.transactions.get(id);
+  if (!t) return;
+  
+  const isIncome = t.type === 'INCOME';
+  const date = document.getElementById('edit-date').value;
+  const category = document.getElementById('edit-category').value;
+  const notes = document.getElementById('edit-notes').value;
+  
+  const updates = { date, category, notes };
+  
   if (isIncome) {
-    const tip       = parseFloat(document.getElementById('txn-tip').value) || 0;
-    const tipMethod = document.getElementById('txn-tip-method').value;
-    record.serviceAmount = amount;
-    record.tipAmount     = tip;
-    record.tipMethod     = tipMethod;
-    record.amount        = amount;
+    updates.serviceAmount = parseFloat(document.getElementById('edit-service').value) || 0;
+    updates.tipAmount = parseFloat(document.getElementById('edit-tip').value) || 0;
+    updates.paymentMethod = document.getElementById('edit-payment').value;
   } else {
-    record.serviceAmount = 0;
-    record.tipAmount     = 0;
-    record.amount        = amount;
+    updates.amount = parseFloat(document.getElementById('edit-amount').value) || 0;
   }
-
-  await db.transactions.add(record);
-  if (date !== state.selectedDate) state.selectedDate = date;
-
+  
+  await firestore.collection('users').doc(currentUser.uid).collection('transactions').doc(id).update(updates);
+  await db.transactions.update(id, updates);
+  
   closeModal();
-  showToast(isIncome ? 'Income saved ✓' : 'Expense saved ✓');
+  showToast('Transaction updated');
   renderDailyView();
 }
 
@@ -806,359 +613,278 @@ async function deleteTransaction(id) {
   const confirmed = await confirmDialog(message, 'Confirm Delete');
   if (!confirmed) return;
   
+  await firestore.collection('users').doc(currentUser.uid).collection('transactions').doc(id).delete();
   await db.transactions.delete(id);
-  showToast('Entry deleted');
+  
+  showToast('Transaction deleted');
   renderDailyView();
 }
 
-async function openEditTransactionModal(id) {
-  await loadCategories();
-  const t = await db.transactions.get(id);
-  if (!t) return;
 
-  const isIncome = t.type === 'INCOME';
-  const catKey   = isIncome ? 'INCOME' : 'DAILY_EXPENSE';
-  const catOptions = (state.categories[catKey] || [])
-    .map(name => `<option value="${name}" ${name === t.category ? 'selected' : ''}>${name}</option>`)
-    .join('');
-  const pmOptions = ['Cash','Card','Venmo','Zelle','Check','Other']
-    .map(m => `<option ${m === t.paymentMethod ? 'selected' : ''}>${m}</option>`).join('');
-
-  openModal(`
-    <h2 class="modal-title">Edit ${isIncome ? 'Income' : 'Expense'}</h2>
-
-    <div class="form-group">
-      <label class="form-label">Date</label>
-      <input type="date" class="form-input" id="txn-date" value="${t.date}">
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Category</label>
-      <select class="form-select" id="txn-category">
-        <option value="">Select category…</option>
-        ${catOptions}
-      </select>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">${isIncome ? 'Service Amount ($)' : 'Amount ($)'}</label>
-      <input type="number" class="form-input" id="txn-amount" step="0.01" min="0" inputmode="decimal"
-        value="${isIncome ? (t.serviceAmount || '') : (t.amount || '')}">
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Payment Method</label>
-      <select class="form-select" id="txn-payment">${pmOptions}</select>
-    </div>
-
-    ${isIncome ? `
-    <hr class="form-section-divider">
-    <div class="form-section-label">Tip (optional)</div>
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Tip Amount ($)</label>
-        <input type="number" class="form-input" id="txn-tip" step="0.01" min="0" inputmode="decimal"
-          value="${t.tipAmount || ''}">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Tip Method</label>
-        <select class="form-select" id="txn-tip-method">
-          <option value="">None</option>
-          <option value="Cash" ${t.tipMethod === 'Cash' ? 'selected' : ''}>Cash</option>
-          <option value="Card" ${t.tipMethod === 'Card' ? 'selected' : ''}>Card</option>
-        </select>
-      </div>
-    </div>
-    ` : ''}
-
-    <div class="form-group">
-      <label class="form-label">Notes (optional)</label>
-      <input type="text" class="form-input" id="txn-notes" value="${t.notes || ''}">
-    </div>
-
-    <button class="btn-submit" onclick="updateTransaction('${id}', '${t.type}')">Save Changes</button>
-  `);
-}
-
-async function updateTransaction(id, type) {
-  const isIncome = type === 'INCOME';
-  const date     = document.getElementById('txn-date').value;
-  const category = document.getElementById('txn-category').value;
-  const amount   = parseFloat(document.getElementById('txn-amount').value) || 0;
-  const payment  = document.getElementById('txn-payment').value;
-  const notes    = document.getElementById('txn-notes').value.trim();
-
-  if (!category) { alert('Please select a category.'); return; }
-  if (amount <= 0) { alert('Please enter an amount greater than zero.'); return; }
-
-  const changes = { date, category, paymentMethod: payment, notes };
-
-  if (isIncome) {
-    const tip       = parseFloat(document.getElementById('txn-tip').value) || 0;
-    const tipMethod = document.getElementById('txn-tip-method').value;
-    changes.serviceAmount = amount;
-    changes.tipAmount     = tip;
-    changes.tipMethod     = tipMethod;
-    changes.amount        = amount;
-  } else {
-    changes.amount        = amount;
-    changes.serviceAmount = 0;
-    changes.tipAmount     = 0;
-  }
-
-  await db.transactions.update(id, changes);
-  if (date !== state.selectedDate) state.selectedDate = date;
-
-  closeModal();
-  showToast('Entry updated ✓');
-  renderDailyView();
-}
-
-// ----------------------------------------------------------------
-// 11. DAY SUMMARY MODAL
-// ----------------------------------------------------------------
-
-async function openDaySummaryModal() {
-  const s = await db.dailySummary.where('date').equals(state.selectedDate).first();
-  openModal(`
-    <h2 class="modal-title">Edit Day Summary</h2>
-    <p style="color:var(--text-muted);font-size:14px;margin-bottom:20px;">${formatDateDisplay(state.selectedDate)}</p>
-
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Clients Seen</label>
-        <input type="number" class="form-input" id="ds-clients" min="0" inputmode="numeric"
-          value="${s ? s.clientsSeen : ''}">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Hours Worked</label>
-        <input type="number" class="form-input" id="ds-hours" min="0" step="0.5" inputmode="decimal"
-          value="${s ? s.hoursWorked : ''}">
-      </div>
-    </div>
-
-    <button class="btn-submit" onclick="saveDaySummary()">Save</button>
-  `);
-}
-
-async function saveDaySummary() {
-  const clients = parseFloat(document.getElementById('ds-clients').value) || 0;
-  const hours   = parseFloat(document.getElementById('ds-hours').value)   || 0;
-
-  const existing = await db.dailySummary.where('date').equals(state.selectedDate).first();
-  if (existing) {
-    await db.dailySummary.update(existing.id, { clientsSeen: clients, hoursWorked: hours });
-  } else {
-    await db.dailySummary.add({ date: state.selectedDate, clientsSeen: clients, hoursWorked: hours });
-  }
-
-  closeModal();
-  showToast('Day summary saved ✓');
-  renderDailyView();
-}
-
-// ----------------------------------------------------------------
-// 12. MONTHLY EXPENSES VIEW
-// ----------------------------------------------------------------
+// ============================================================
+// MONTHLY VIEW
+// ============================================================
 
 async function renderMonthlyView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = '';
-
-  const allExpenses = await db.monthlyExpenses.toArray();
-  const expenses = allExpenses.filter(
-    e => e.year === state.selectedYear && e.month === state.selectedMonth
-  );
-
-  const total = expenses.reduce((s, e) => s + (e.amount || 0), 0);
+  const content = document.getElementById('content');
   
-  // Calculate comparison stats
-  let comparisonHTML = '';
-  const isCurrentMonth = state.selectedYear === new Date().getFullYear() && 
-                        state.selectedMonth === (new Date().getMonth() + 1);
-  
-  if (isCurrentMonth) {
-    // Last month
-    let lastMonth = state.selectedMonth - 1;
-    let lastYear = state.selectedYear;
-    if (lastMonth < 1) {
-      lastMonth = 12;
-      lastYear--;
-    }
-    const lastMonthExpenses = allExpenses
-      .filter(e => e.year === lastYear && e.month === lastMonth)
-      .reduce((s, e) => s + (e.amount || 0), 0);
+  try {
+    console.log('Rendering monthly view:', state.selectedMonth, state.selectedYear);
     
-    // Same month last year
-    const sameMonthLastYear = state.selectedMonth;
-    const previousYear = state.selectedYear - 1;
-    const lastYearExpenses = allExpenses
-      .filter(e => e.year === previousYear && e.month === sameMonthLastYear)
-      .reduce((s, e) => s + (e.amount || 0), 0);
+    // Get all expenses and filter in JavaScript (Dexie doesn't support multiple where clauses)
+    const allExpenses = await db.monthlyExpenses.toArray();
+    const expenses = allExpenses.filter(e => 
+      e.year === state.selectedYear && 
+      e.month === state.selectedMonth
+    );
     
-    const calcChange = (current, previous) => {
-      if (previous === 0) return current > 0 ? 100 : 0;
-      return ((current - previous) / previous) * 100;
-    };
+    console.log('Loaded expenses:', expenses.length);
     
-    const vsLastMonth = calcChange(total, lastMonthExpenses);
-    const vsLastYear = calcChange(total, lastYearExpenses);
+    const total = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
     
-    const formatChange = (change, prevAmount) => {
-      if (prevAmount === 0 && change === 0) {
-        return '<span style="color:var(--text-muted); font-size:14px;">No data</span>';
-      }
-      const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
-      // For expenses, reverse colors: higher = bad (red), lower = good (green)
-      const color = change > 0 ? '#C13838' : change < 0 ? '#2D7A4C' : '#999';
-      const percent = Math.abs(change).toFixed(0);
-      return `
-        <div style="color:${color};">
-          <span class="comparison-arrow">${arrow}</span><span class="comparison-percent">${percent}%</span>
+    const monthDisplay = `${monthName(state.selectedMonth)} ${state.selectedYear}`;
+    
+    // Check if viewing current month
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+    const isCurrentMonth = (state.selectedMonth === currentMonth && state.selectedYear === currentYear);
+    
+    // Calculate comparison stats (only for current month)
+    let comparisonHTML = '';
+    if (isCurrentMonth) {
+      // Last month
+      let lastMonth = currentMonth - 1;
+      let lastMonthYear = currentYear;
+      if (lastMonth < 1) { lastMonth = 12; lastMonthYear--; }
+      
+      const lastMonthExpenses = allExpenses.filter(e => 
+        e.year === lastMonthYear && e.month === lastMonth
+      );
+      const lastMonthTotal = lastMonthExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+      
+      // Same month last year
+      const lastYearMonth = currentMonth;
+      const lastYear = currentYear - 1;
+      
+      const lastYearExpenses = allExpenses.filter(e => 
+        e.year === lastYear && e.month === lastYearMonth
+      );
+      const lastYearTotal = lastYearExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+      
+      // Calculate percentage changes
+      const calcChange = (current, previous) => {
+        if (previous === 0) return current > 0 ? 100 : 0;
+        return ((current - previous) / previous) * 100;
+      };
+      
+      const vsLastMonth = calcChange(total, lastMonthTotal);
+      const vsLastYear = calcChange(total, lastYearTotal);
+      
+      const formatChange = (change, prevAmount) => {
+        if (prevAmount === 0 && change === 0) {
+          return '<span style="color:var(--text-muted); font-size:14px;">No data</span>';
+        }
+        const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
+        // Note: For expenses, higher is worse, but we'll keep consistent coloring
+        const color = change > 0 ? '#C13838' : change < 0 ? '#2D7A4C' : '#999';
+        const percent = Math.abs(change).toFixed(0);
+        return `
+          <div style="color:${color}; font-size:20px; font-weight:600;">
+            <span>${arrow}</span> <span>${percent}%</span>
+          </div>
+        `;
+      };
+      
+      comparisonHTML = `
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:24px;">
+          <div class="summary-card">
+            <div class="summary-label">vs Last Month</div>
+            ${formatChange(vsLastMonth, lastMonthTotal)}
+            <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${monthName(lastMonth)}: ${fmt(lastMonthTotal)}</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">vs Last ${monthName(lastYearMonth)}</div>
+            ${formatChange(vsLastYear, lastYearTotal)}
+            <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${lastYear}: ${fmt(lastYearTotal)}</div>
+          </div>
         </div>
       `;
-    };
+    }
     
-    comparisonHTML = `
-      <div class="comparison-cards">
-        <div class="comparison-card">
-          <div class="comparison-label">vs ${monthName(lastMonth)}</div>
-          <div class="comparison-value">${formatChange(vsLastMonth, lastMonthExpenses)}</div>
-          <div class="comparison-amount">${fmt(lastMonthExpenses)}</div>
+    content.innerHTML = `
+    <div class="page-header">
+      <h2 class="page-title">Monthly Expenses</h2>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
+        <button class="btn-secondary" onclick="changeMonth(-1)">← Prev</button>
+        <select class="form-select" style="width:auto;" value="${state.selectedMonth}" onchange="state.selectedMonth=parseInt(this.value); renderMonthlyView()">
+          ${Array.from({length:12}, (_,i) => i+1).map(m => 
+            `<option value="${m}" ${m === state.selectedMonth ? 'selected' : ''}>${monthName(m)}</option>`
+          ).join('')}
+        </select>
+        <select class="form-select" style="width:auto;" value="${state.selectedYear}" onchange="state.selectedYear=parseInt(this.value); renderMonthlyView()">
+          ${[2023,2024,2025,2026,2027].map(y => 
+            `<option value="${y}" ${y === state.selectedYear ? 'selected' : ''}>${y}</option>`
+          ).join('')}
+        </select>
+        <button class="btn-secondary" onclick="changeMonth(1)">Next →</button>
+        <button class="btn-secondary" onclick="goToCurrentMonth()">Current</button>
+      </div>
+      <p class="page-subtitle">${monthDisplay}</p>
+    </div>
+    
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-label">Total Expenses</div>
+        <div class="summary-amount negative">${fmt(total)}</div>
+      </div>
+    </div>
+    
+    ${comparisonHTML}
+    
+    <div class="quick-entry">
+      <div class="quick-entry-title">Add Monthly Expense</div>
+      <div class="quick-entry-grid" style="grid-template-columns: repeat(2, 1fr) auto;">
+        <div class="form-group">
+          <label class="form-label">Category</label>
+          <select id="monthly-category" class="form-select">
+            ${(state.categories.MONTHLY_EXPENSE || []).map(c => `<option value="${c}">${c}</option>`).join('')}
+          </select>
         </div>
-        <div class="comparison-card">
-          <div class="comparison-label">vs Last ${monthName(sameMonthLastYear)}</div>
-          <div class="comparison-value">${formatChange(vsLastYear, lastYearExpenses)}</div>
-          <div class="comparison-amount">${fmt(lastYearExpenses)}</div>
+        <div class="form-group">
+          <label class="form-label">Amount</label>
+          <input type="number" id="monthly-amount" class="form-input" step="0.01" placeholder="0.00">
         </div>
+        <button class="btn-primary" onclick="addMonthlyExpense()" style="align-self:end;">Add</button>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h3 style="font-size:18px; margin-bottom:16px;">This Month's Expenses</h3>
+      ${expenses.length === 0 ? '<p style="text-align:center; color:var(--text-muted); padding:40px;">No expenses yet</p>' : `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Amount</th>
+              <th>Notes</th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${expenses.map(e => `
+              <tr>
+                <td>${e.category}</td>
+                <td style="font-weight:600; color:var(--danger)">${fmt(e.amount)}</td>
+                <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis;">${e.notes || '—'}</td>
+                <td><button class="btn-secondary" style="padding:6px 12px; font-size:12px;" onclick="openEditMonthlyExpenseModal('${e.id}')">Edit</button></td>
+                <td><button class="btn-danger" style="padding:6px 12px; font-size:12px;" onclick="deleteMonthlyExpense('${e.id}')">Delete</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `}
+    </div>
+  `;
+  } catch (err) {
+    console.error('Error rendering monthly view:', err);
+    content.innerHTML = `
+      <div class="card" style="text-align:center; padding:40px;">
+        <h2 style="color:var(--danger);">Error Loading Monthly View</h2>
+        <p>${err.message}</p>
+        <button class="btn-primary" onclick="navigate('daily')">Go to Daily</button>
       </div>
     `;
   }
-
-  const monthOptions = Array.from({length:12}, (_,i) =>
-    `<option value="${i+1}" ${i+1 === state.selectedMonth ? 'selected' : ''}>${monthName(i+1)}</option>`
-  ).join('');
-
-  const yearNow = new Date().getFullYear();
-  const yearOptions = [yearNow-1, yearNow, yearNow+1].map(y =>
-    `<option value="${y}" ${y === state.selectedYear ? 'selected' : ''}>${y}</option>`
-  ).join('');
-
-  content.innerHTML = `
-    <div class="monthly-header">
-      <button class="date-nav-btn" onclick="changeMonth(-1)">‹</button>
-      <div>
-        <select class="report-select" style="margin-bottom:4px" onchange="state.selectedMonth=parseInt(this.value);renderMonthlyView()">${monthOptions}</select>
-        <select class="report-select" onchange="state.selectedYear=parseInt(this.value);renderMonthlyView()">${yearOptions}</select>
-      </div>
-      <button class="date-nav-btn" onclick="changeMonth(1)">›</button>
-    </div>
-
-    <div class="monthly-total-card">
-      <div class="monthly-total-label">Total Fixed Expenses — ${monthName(state.selectedMonth)} ${state.selectedYear}</div>
-      <div class="monthly-total-value">${fmt(total)}</div>
-    </div>
-
-    ${comparisonHTML}
-
-    <div style="padding: 0 16px 8px;">
-      <div class="section-label">Expenses</div>
-      ${expenses.length === 0 ? `
-        <div class="empty-state">
-          <div class="empty-icon">🏠</div>
-          <div class="empty-text">No monthly expenses logged yet.<br>Tap below to add one.</div>
-        </div>
-      ` : expenses.map(e => `
-        <div class="monthly-expense-item">
-          <div style="flex:1;cursor:pointer;" onclick="openEditMonthlyExpenseModal('${e.id}')">
-            <div class="mexp-category">${e.category} <span style="font-size:11px;color:var(--text-light);font-weight:400;">✏</span></div>
-            <div class="mexp-notes">${e.datePaid ? formatDateShort(e.datePaid) : ''}${e.notes ? (e.datePaid ? ' · ' : '') + e.notes : ''}</div>
-          </div>
-          <div class="mexp-amount" onclick="openEditMonthlyExpenseModal('${e.id}')" style="cursor:pointer;">${fmt(e.amount)}</div>
-          <button class="mexp-delete" onclick="deleteMonthlyExpense('${e.id}')">✕</button>
-        </div>
-      `).join('')}
-
-      <div class="fab-row" style="padding: 16px 0;">
-        <button class="fab fab-expense" onclick="openAddMonthlyExpenseModal()" style="background:var(--plum)">
-          <span style="font-size:18px">+</span> Add Monthly Expense
-        </button>
-      </div>
-    </div>
-  `;
 }
 
 function changeMonth(delta) {
-  state.selectedMonth += delta;
-  if (state.selectedMonth > 12) { state.selectedMonth = 1;  state.selectedYear++; }
-  if (state.selectedMonth < 1)  { state.selectedMonth = 12; state.selectedYear--; }
+  let m = state.selectedMonth + delta;
+  let y = state.selectedYear;
+  if (m < 1) { m = 12; y--; }
+  if (m > 12) { m = 1; y++; }
+  state.selectedMonth = m;
+  state.selectedYear = y;
   renderMonthlyView();
 }
 
-async function openAddMonthlyExpenseModal() {
-  await loadCategories();
-  const catOptions = categoryOptions('MONTHLY_EXPENSE');
+function goToCurrentMonth() {
+  const now = new Date();
+  state.selectedMonth = now.getMonth() + 1;
+  state.selectedYear = now.getFullYear();
+  renderMonthlyView();
+}
 
+async function addMonthlyExpense() {
+  const category = document.getElementById('monthly-category').value;
+  const amount = parseFloat(document.getElementById('monthly-amount').value);
+  
+  if (!amount || amount <= 0) {
+    showToast('Please enter a valid amount');
+    return;
+  }
+  
+  const expense = {
+    userId: currentUser.uid,
+    year: state.selectedYear,
+    month: state.selectedMonth,
+    category: category,
+    amount: amount,
+    createdAt: firebase.firestore.Timestamp.now()
+  };
+  
+  const docRef = await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').add(expense);
+  await db.monthlyExpenses.put({ id: docRef.id, ...expense });
+  
+  document.getElementById('monthly-amount').value = '';
+  showToast('Expense added');
+  renderMonthlyView();
+}
+
+async function openEditMonthlyExpenseModal(id) {
+  const e = await db.monthlyExpenses.get(id);
+  if (!e) return;
+  
+  const catOptions = (state.categories.MONTHLY_EXPENSE || [])
+    .map(name => `<option value="${name}" ${name === e.category ? 'selected' : ''}>${name}</option>`)
+    .join('');
+  
   openModal(`
-    <h2 class="modal-title">+ Add Monthly Expense</h2>
-
-    <div class="form-group">
-      <label class="form-label">Date Paid</label>
-      <input type="date" class="form-input" id="me-date" value="${todayStr()}">
-    </div>
-
-    <div class="form-row">
+    <h2 class="modal-title">Edit Monthly Expense</h2>
+    <form onsubmit="saveEditMonthlyExpense('${id}'); return false;">
       <div class="form-group">
-        <label class="form-label">Month</label>
-        <select class="form-select" id="me-month">
-          ${Array.from({length:12},(_,i)=>`<option value="${i+1}" ${i+1===state.selectedMonth?'selected':''}>${monthName(i+1)}</option>`).join('')}
-        </select>
+        <label class="form-label">Category</label>
+        <select id="edit-exp-category" class="form-select" required>${catOptions}</select>
       </div>
       <div class="form-group">
-        <label class="form-label">Year</label>
-        <input type="number" class="form-input" id="me-year" value="${state.selectedYear}" min="2020" max="2099" inputmode="numeric">
+        <label class="form-label">Amount</label>
+        <input type="number" id="edit-exp-amount" class="form-input" step="0.01" value="${e.amount || 0}" required>
       </div>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Category</label>
-      <select class="form-select" id="me-category">
-        <option value="">Select category…</option>
-        ${catOptions}
-      </select>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Amount ($)</label>
-      <input type="number" class="form-input" id="me-amount" placeholder="0.00" step="0.01" min="0" inputmode="decimal">
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Notes (optional)</label>
-      <input type="text" class="form-input" id="me-notes" placeholder="e.g. annual increase, pro-rated…">
-    </div>
-
-    <button class="btn-submit" onclick="saveMonthlyExpense()">Save</button>
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <input type="text" id="edit-exp-notes" class="form-input" value="${e.notes || ''}">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:24px;">
+        <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" style="flex:1;">Save</button>
+      </div>
+    </form>
   `);
 }
 
-async function saveMonthlyExpense() {
-  const datePaid = document.getElementById('me-date').value;
-  const month    = parseInt(document.getElementById('me-month').value);
-  const year     = parseInt(document.getElementById('me-year').value);
-  const category = document.getElementById('me-category').value;
-  const amount   = parseFloat(document.getElementById('me-amount').value) || 0;
-  const notes    = document.getElementById('me-notes').value.trim();
-
-  if (!category) { alert('Please select a category.'); return; }
-  if (amount <= 0) { alert('Please enter an amount greater than zero.'); return; }
-
-  await db.monthlyExpenses.add({ datePaid, month, year, category, amount, notes });
-  state.selectedMonth = month;
-  state.selectedYear  = year;
-
+async function saveEditMonthlyExpense(id) {
+  const updates = {
+    category: document.getElementById('edit-exp-category').value,
+    amount: parseFloat(document.getElementById('edit-exp-amount').value) || 0,
+    notes: document.getElementById('edit-exp-notes').value
+  };
+  
+  await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').doc(id).update(updates);
+  await db.monthlyExpenses.update(id, updates);
+  
   closeModal();
-  showToast('Monthly expense saved ✓');
+  showToast('Expense updated');
   renderMonthlyView();
 }
 
@@ -1166,823 +892,743 @@ async function deleteMonthlyExpense(id) {
   const e = await db.monthlyExpenses.get(id);
   if (!e) return;
   
-  const monthYear = `${monthName(e.month)} ${e.year}`;
-  const message = `Are you sure you want to delete this monthly expense?\n\n${e.category}: ${fmt(e.amount)}\n${monthYear}\n\nThis cannot be undone.`;
+  const message = `Are you sure you want to delete this monthly expense?\n\n${e.category}: ${fmt(e.amount)}\n${monthName(e.month)} ${e.year}\n\nThis cannot be undone.`;
   
   const confirmed = await confirmDialog(message, 'Confirm Delete');
   if (!confirmed) return;
   
+  await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').doc(id).delete();
   await db.monthlyExpenses.delete(id);
+  
   showToast('Expense deleted');
   renderMonthlyView();
 }
 
-async function openEditMonthlyExpenseModal(id) {
-  await loadCategories();
-  const e = await db.monthlyExpenses.get(id);
-  if (!e) return;
-  const catOptions = (state.categories.MONTHLY_EXPENSE || [])
-    .map(name => `<option value="${name}" ${name === e.category ? 'selected' : ''}>${name}</option>`)
-    .join('');
 
-  openModal(`
-    <h2 class="modal-title">Edit Monthly Expense</h2>
-
-    <div class="form-group">
-      <label class="form-label">Date Paid</label>
-      <input type="date" class="form-input" id="me-date" value="${e.datePaid || ''}">
-    </div>
-
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Month</label>
-        <select class="form-select" id="me-month">
-          ${Array.from({length:12},(_,i)=>`<option value="${i+1}" ${i+1===e.month?'selected':''}>${monthName(i+1)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Year</label>
-        <input type="number" class="form-input" id="me-year" value="${e.year}" min="2020" max="2099" inputmode="numeric">
-      </div>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Category</label>
-      <select class="form-select" id="me-category">
-        <option value="">Select category…</option>
-        ${catOptions}
-      </select>
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Amount ($)</label>
-      <input type="number" class="form-input" id="me-amount" placeholder="0.00" step="0.01" min="0" inputmode="decimal"
-        value="${e.amount || ''}">
-    </div>
-
-    <div class="form-group">
-      <label class="form-label">Notes (optional)</label>
-      <input type="text" class="form-input" id="me-notes" value="${e.notes || ''}">
-    </div>
-
-    <button class="btn-submit" onclick="updateMonthlyExpense('${id}')">Save Changes</button>
-  `);
-}
-
-async function updateMonthlyExpense(id) {
-  const datePaid = document.getElementById('me-date').value;
-  const month    = parseInt(document.getElementById('me-month').value);
-  const year     = parseInt(document.getElementById('me-year').value);
-  const category = document.getElementById('me-category').value;
-  const amount   = parseFloat(document.getElementById('me-amount').value) || 0;
-  const notes    = document.getElementById('me-notes').value.trim();
-
-  if (!category) { alert('Please select a category.'); return; }
-  if (amount <= 0) { alert('Please enter an amount greater than zero.'); return; }
-
-  await db.monthlyExpenses.update(id, { datePaid, month, year, category, amount, notes });
-  state.selectedMonth = month;
-  state.selectedYear  = year;
-
-  closeModal();
-  showToast('Expense updated ✓');
-  renderMonthlyView();
-}
-
-// ----------------------------------------------------------------
-// 13. REPORTS VIEW
-// ----------------------------------------------------------------
+// ============================================================
+// REPORTS VIEW
+// ============================================================
 
 async function renderReportsView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = '';
-
+  const content = document.getElementById('content');
+  
   const reportTypes = [
-    { id: 'daily',    label: 'Daily' },
-    { id: 'weekly',   label: 'Weekly' },
-    { id: 'monthly',  label: 'Monthly' },
-    { id: 'annual',   label: 'Annual' },
-    { id: 'yoy',      label: 'Year vs Year' },
+    { id: 'weekly', label: 'Weekly' },
+    { id: 'monthly', label: 'Monthly' },
+    { id: 'annual', label: 'Annual' },
+    { id: 'yoy', label: 'Year vs Year' },
     { id: 'category', label: 'By Category' },
-    { id: 'export',   label: '📥 Export CSV' },
+    { id: 'export', label: '📥 Export' }
   ];
-
+  
   const tabs = reportTypes.map(r =>
-    `<button class="tab-btn ${state.reportType === r.id ? 'active' : ''}"
-      onclick="state.reportType='${r.id}'; renderReportsView()">
+    `<button class="tab-btn ${state.reportType === r.id ? 'active' : ''}" onclick="state.reportType='${r.id}'; renderReportsView()">
       ${r.label}
     </button>`
   ).join('');
-
+  
   content.innerHTML = `
-    <div class="report-type-tabs">${tabs}</div>
-    <div id="report-inner"></div>
-  `;
-
-  await renderReportInner();
-}
-
-async function renderReportInner() {
-  const el = document.getElementById('report-inner');
-  if (!el) return;
-
-  const yearNow  = new Date().getFullYear();
-  const monthNow = new Date().getMonth() + 1;
-
-  switch (state.reportType) {
-
-    case 'daily': {
-      el.innerHTML = `
-        <div class="report-controls">
-          <input type="date" class="report-input" id="r-date" value="${state.selectedDate}">
-          <button class="report-btn" onclick="runDailyReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
-      await runDailyReport();
-      break;
-    }
-
-    case 'weekly': {
-      el.innerHTML = `
-        <div class="report-controls">
-          <input type="date" class="report-input" id="r-week-date" value="${state.selectedDate}"
-            placeholder="Pick any day in the week">
-          <button class="report-btn" onclick="runWeeklyReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
-      await runWeeklyReport();
-      break;
-    }
-
-    case 'monthly': {
-      const monthOpts = Array.from({length:12},(_,i)=>
-        `<option value="${i+1}" ${i+1===monthNow?'selected':''}>${monthName(i+1)}</option>`).join('');
-      el.innerHTML = `
-        <div class="report-controls">
-          <select class="report-select" id="r-month">${monthOpts}</select>
-          <input type="number" class="report-input" id="r-year" value="${yearNow}" min="2020" max="2099" style="max-width:90px" inputmode="numeric">
-          <button class="report-btn" onclick="runMonthlyReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
-      await runMonthlyReport();
-      break;
-    }
-
-    case 'annual': {
-      el.innerHTML = `
-        <div class="report-controls">
-          <input type="number" class="report-input" id="r-annual-year" value="${yearNow}" min="2020" max="2099" style="max-width:100px" inputmode="numeric">
-          <button class="report-btn" onclick="runAnnualReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
-      await runAnnualReport();
-      break;
-    }
-
-    case 'yoy': {
-      el.innerHTML = `
-        <div class="report-controls" style="gap:6px;">
-          <input type="number" class="report-input" id="r-yoy-year1" value="${yearNow-1}" min="2020" max="2099" inputmode="numeric">
-          <span style="color:var(--text-muted)">vs</span>
-          <input type="number" class="report-input" id="r-yoy-year2" value="${yearNow}" min="2020" max="2099" inputmode="numeric">
-          <button class="report-btn" onclick="runYOYReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
-      await runYOYReport();
-      break;
-    }
-
-    case 'category': {
-      el.innerHTML = `
-        <div class="report-controls" style="flex-wrap:wrap; gap:8px;">
-          <input type="date" class="report-input" id="r-cat-from" value="${new Date().getFullYear()}-01-01">
-          <span style="color:var(--text-muted)">to</span>
-          <input type="date" class="report-input" id="r-cat-to" value="${todayStr()}">
-          <button class="report-btn" onclick="runCategoryReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
-      await runCategoryReport();
-      break;
-    }
-
-    case 'export': {
-      el.innerHTML = `
-        <div class="report-controls" style="flex-wrap:wrap; gap:8px;">
-          <div style="flex:1; min-width:200px;">
-            <label style="font-size:12px; color:var(--text-muted); display:block; margin-bottom:4px;">From Date</label>
-            <input type="date" class="report-input" id="r-exp-from" value="${new Date().getFullYear()}-01-01">
-          </div>
-          <div style="flex:1; min-width:200px;">
-            <label style="font-size:12px; color:var(--text-muted); display:block; margin-bottom:4px;">To Date</label>
-            <input type="date" class="report-input" id="r-exp-to" value="${todayStr()}">
-          </div>
-        </div>
-        <div class="report-body">
-          <p style="color:var(--text-muted); font-size:14px; margin-bottom:16px; line-height:1.6;">
-            Export all transactions in the selected date range to a CSV file.
-            Open it in Excel or Google Sheets for further analysis.
-          </p>
-          <button class="export-btn" onclick="exportCSV()">
-            📥 Download CSV File
-          </button>
-        </div>
-      `;
-      break;
-    }
-  }
-}
-
-// ---- Daily Report ----
-async function runDailyReport() {
-  const date = document.getElementById('r-date')?.value || state.selectedDate;
-  const txns = await db.transactions.where('date').equals(date).toArray();
-  const sum  = await db.dailySummary.where('date').equals(date).first();
-
-  const income   = txns.filter(t => t.type === 'INCOME');
-  const expenses = txns.filter(t => t.type === 'EXPENSE');
-  const svcTotal = income.reduce((s,t) => s + (t.serviceAmount||0), 0);
-  const tipTotal = income.reduce((s,t) => s + (t.tipAmount||0), 0);
-  const expTotal = expenses.reduce((s,t) => s + (t.amount||0), 0);
-
-  document.getElementById('report-output').innerHTML = `
-    <div class="report-section-title">${formatDateDisplay(date)}</div>
-    <div class="report-stat-grid">
-      <div class="report-stat"><div class="report-stat-label">Services</div><div class="report-stat-value green">${fmt(svcTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Tips</div><div class="report-stat-value gold">${fmt(tipTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Expenses</div><div class="report-stat-value red">${fmt(expTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Net</div><div class="report-stat-value plum">${fmt(svcTotal+tipTotal-expTotal)}</div></div>
-      ${sum ? `
-      <div class="report-stat"><div class="report-stat-label">Clients</div><div class="report-stat-value">${sum.clientsSeen}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Hours</div><div class="report-stat-value">${sum.hoursWorked}</div></div>
-      ` : ''}
+    <div class="page-header">
+      <h2 class="page-title">Reports</h2>
+      <p class="page-subtitle">Analyze your salon performance</p>
     </div>
-    ${income.length > 0 ? `
-      <div class="report-white-card">
-        <div class="report-section-title">Income Breakdown</div>
-        ${income.map(t=>`
-          <div class="report-row">
-            <div><div class="report-row-label">${t.category}</div><div class="report-row-sub">${t.paymentMethod||''}</div></div>
-            <div class="report-row-value income">+${fmt((t.serviceAmount||0)+(t.tipAmount||0))}</div>
-          </div>
-        `).join('')}
-      </div>
-    ` : ''}
-    ${expenses.length > 0 ? `
-      <div class="report-white-card">
-        <div class="report-section-title">Expense Breakdown</div>
-        ${expenses.map(t=>`
-          <div class="report-row">
-            <div><div class="report-row-label">${t.category}</div><div class="report-row-sub">${t.notes||''}</div></div>
-            <div class="report-row-value expense">-${fmt(t.amount)}</div>
-          </div>
-        `).join('')}
-      </div>
-    ` : ''}
-    ${txns.length === 0 ? `<p style="color:var(--text-muted);text-align:center;padding:30px 0;">No entries for this date.</p>` : ''}
+    <div class="card">
+      <div class="report-tabs">${tabs}</div>
+      <div id="report-content"></div>
+    </div>
   `;
+  
+  await renderReportContent();
 }
 
-// ---- Weekly Report ----
-async function runWeeklyReport() {
-  const pickedDate = document.getElementById('r-week-date')?.value || state.selectedDate;
-  const weekStart  = getWeekStart(pickedDate);
+async function renderReportContent() {
+  const el = document.getElementById('report-content');
+  if (!el) return;
+  
+  switch(state.reportType) {
+    case 'weekly': await renderWeeklyReport(el); break;
+    case 'monthly': await renderMonthlyReport(el); break;
+    case 'annual': await renderAnnualReport(el); break;
+    case 'yoy': await renderYOYReport(el); break;
+    case 'category': await renderCategoryReport(el); break;
+    case 'export': await renderExportReport(el); break;
+  }
+}
 
-  let weeklyIncome = 0, weeklyTips = 0, weeklyExp = 0, weeklyClients = 0;
-  const rows = [];
+async function renderWeeklyReport(el) {
+  const weekStart = getWeekStart(state.selectedDate);
+  const dates = Array.from({length: 7}, (_, i) => addDays(weekStart, i));
+  
+  const allTxns = await db.transactions.toArray();
+  const weekTxns = allTxns.filter(t => dates.includes(t.date));
+  
+  const dailyTotals = dates.map(date => {
+    const dayTxns = weekTxns.filter(t => t.date === date);
+    const income = dayTxns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+    const expense = dayTxns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount||0), 0);
+    return { date, income, expense, net: income - expense };
+  });
+  
+  const totalIncome = dailyTotals.reduce((s, d) => s + d.income, 0);
+  const totalExpense = dailyTotals.reduce((s, d) => s + d.expense, 0);
+  const totalNet = totalIncome - totalExpense;
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+        <button class="btn-secondary" onclick="state.selectedDate=addDays(state.selectedDate,-7); renderReportsView()">← Prev Week</button>
+        <span style="font-weight:600;">${new Date(weekStart+'T00:00:00').toLocaleDateString()} - ${new Date(dates[6]+'T00:00:00').toLocaleDateString()}</span>
+        <button class="btn-secondary" onclick="state.selectedDate=addDays(state.selectedDate,7); renderReportsView()">Next Week →</button>
+      </div>
+      
+      <div class="summary-grid" style="margin-bottom:24px;">
+        <div class="summary-card">
+          <div class="summary-label">Week Income</div>
+          <div class="summary-amount positive">${fmt(totalIncome)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Week Expenses</div>
+          <div class="summary-amount negative">${fmt(totalExpense)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Week Net</div>
+          <div class="summary-amount ${totalNet >= 0 ? 'positive' : 'negative'}">${fmt(totalNet)}</div>
+        </div>
+      </div>
+      
+      <canvas id="weekly-chart" style="max-height:300px;"></canvas>
+      
+      <table class="data-table" style="margin-top:24px;">
+        <thead>
+          <tr>
+            <th>Day</th>
+            <th>Income</th>
+            <th>Expenses</th>
+            <th>Net</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${dailyTotals.map(d => {
+            const dateObj = new Date(d.date + 'T00:00:00');
+            const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+            return `
+              <tr>
+                <td>${dayName}, ${dateObj.toLocaleDateString()}</td>
+                <td style="color:var(--success)">${fmt(d.income)}</td>
+                <td style="color:var(--danger)">${fmt(d.expense)}</td>
+                <td style="font-weight:600;color:${d.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(d.net)}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  
+  // Draw Chart
+  const ctx = document.getElementById('weekly-chart');
+  if (ctx && window.Chart) {
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: dailyTotals.map(d => {
+          const dateObj = new Date(d.date + 'T00:00:00');
+          return dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        }),
+        datasets: [
+          {
+            label: 'Income',
+            data: dailyTotals.map(d => d.income),
+            backgroundColor: 'rgba(45, 122, 76, 0.8)',
+          },
+          {
+            label: 'Expenses',
+            data: dailyTotals.map(d => d.expense),
+            backgroundColor: 'rgba(193, 56, 56, 0.8)',
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        scales: {
+          y: { 
+            beginAtZero: true,
+            ticks: {
+              callback: function(value) {
+                return '$' + value.toFixed(0);
+              }
+            }
+          }
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.dataset.label || '';
+                const value = context.parsed.y || 0;
+                return `${label}: $${value.toFixed(2)}`;
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+}
 
-  for (let i = 0; i < 7; i++) {
-    const d    = addDays(weekStart, i);
-    const txns = await db.transactions.where('date').equals(d).toArray();
-    const sum  = await db.dailySummary.where('date').equals(d).first();
-    const inc  = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
-    const tips = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
-    const exp  = txns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
-    const cls  = sum ? sum.clientsSeen : 0;
-    weeklyIncome  += inc;
-    weeklyTips    += tips;
-    weeklyExp     += exp;
-    weeklyClients += cls;
-    if (txns.length > 0 || sum) {
-      rows.push({ d, inc, tips, exp, cls, net: inc+tips-exp });
+async function renderMonthlyReport(el) {
+  const allTxns = await db.transactions.toArray();
+  const monthTxns = allTxns.filter(t => {
+    const [y, m] = t.date.split('-');
+    return parseInt(y) === state.selectedYear && parseInt(m) === state.selectedMonth;
+  });
+  
+  const income = monthTxns.filter(t => t.type === 'INCOME');
+  const expenses = monthTxns.filter(t => t.type === 'EXPENSE');
+  
+  const totalIncome = income.reduce((s, t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+  const totalExpense = expenses.reduce((s, t) => s + (t.amount||0), 0);
+  const totalNet = totalIncome - totalExpense;
+  
+  // Monthly expenses - Get all and filter (Dexie doesn't support chaining where clauses)
+  const allMonthlyExpenses = await db.monthlyExpenses.toArray();
+  const monthlyExpenses = allMonthlyExpenses.filter(e => 
+    e.year === state.selectedYear && 
+    e.month === state.selectedMonth
+  );
+  const monthlyExpenseTotal = monthlyExpenses.reduce((s, e) => s + (e.amount||0), 0);
+  
+  const netAfterMonthly = totalNet - monthlyExpenseTotal;
+  
+  // Category breakdown
+  const incomeByCategory = {};
+  income.forEach(t => {
+    const cat = t.category || 'Other';
+    incomeByCategory[cat] = (incomeByCategory[cat] || 0) + (t.serviceAmount||0) + (t.tipAmount||0);
+  });
+  
+  const expenseByCategory = {};
+  expenses.forEach(t => {
+    const cat = t.category || 'Other';
+    expenseByCategory[cat] = (expenseByCategory[cat] || 0) + (t.amount||0);
+  });
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+        <button class="btn-secondary" onclick="changeMonth(-1); renderReportsView()">← Prev</button>
+        <select class="form-select" style="width:auto;" onchange="state.selectedMonth=parseInt(this.value); renderReportsView()">
+          ${Array.from({length:12}, (_,i) => i+1).map(m => 
+            `<option value="${m}" ${m === state.selectedMonth ? 'selected' : ''}>${monthName(m)}</option>`
+          ).join('')}
+        </select>
+        <select class="form-select" style="width:auto;" onchange="state.selectedYear=parseInt(this.value); renderReportsView()">
+          ${[2023,2024,2025,2026,2027].map(y => 
+            `<option value="${y}" ${y === state.selectedYear ? 'selected' : ''}>${y}</option>`
+          ).join('')}
+        </select>
+        <button class="btn-secondary" onclick="changeMonth(1); renderReportsView()">Next →</button>
+      </div>
+      
+      <div class="summary-grid" style="margin-bottom:24px;">
+        <div class="summary-card">
+          <div class="summary-label">Total Income</div>
+          <div class="summary-amount positive">${fmt(totalIncome)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Daily Expenses</div>
+          <div class="summary-amount negative">${fmt(totalExpense)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Monthly Expenses</div>
+          <div class="summary-amount negative">${fmt(monthlyExpenseTotal)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Net Profit</div>
+          <div class="summary-amount ${netAfterMonthly >= 0 ? 'positive' : 'negative'}">${fmt(netAfterMonthly)}</div>
+        </div>
+      </div>
+      
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px; margin-top:24px;">
+        <div>
+          <h4 style="margin-bottom:12px;">Income by Category</h4>
+          <canvas id="income-pie-chart" style="max-height:300px;"></canvas>
+          <div id="income-summary" style="margin-top:16px;"></div>
+        </div>
+        <div>
+          <h4 style="margin-bottom:12px;">Expenses by Category</h4>
+          <canvas id="expense-pie-chart" style="max-height:300px;"></canvas>
+          <div id="expense-summary" style="margin-top:16px;"></div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Income Pie Chart
+  const incomeCtx = document.getElementById('income-pie-chart');
+  if (incomeCtx && window.Chart && Object.keys(incomeByCategory).length > 0) {
+    const incomeColors = [
+      '#2D7A4C', '#4A90E2', '#F5A623', '#7B68EE', '#50C878', '#FF6B6B',
+      '#4ECDC4', '#FFD93D', '#C44569', '#6C5CE7', '#FD79A8', '#A29BFE'
+    ];
+    
+    new Chart(incomeCtx, {
+      type: 'pie',
+      data: {
+        labels: Object.keys(incomeByCategory),
+        datasets: [{
+          data: Object.values(incomeByCategory),
+          backgroundColor: incomeColors
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.label || '';
+                const value = context.parsed || 0;
+                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                return `${label}: $${value.toFixed(2)} (${percentage}%)`;
+              }
+            }
+          }
+        }
+      }
+    });
+    
+    // Generate income summary table
+    const incomeTotal = Object.values(incomeByCategory).reduce((a, b) => a + b, 0);
+    const incomeSummary = document.getElementById('income-summary');
+    if (incomeSummary) {
+      const sortedIncome = Object.entries(incomeByCategory).sort((a, b) => b[1] - a[1]);
+      incomeSummary.innerHTML = `
+        <table style="width:100%; font-size:13px; border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border); text-align:left;">
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted);">Category</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">Amount</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sortedIncome.map(([category, amount], index) => {
+              const percentage = incomeTotal > 0 ? ((amount / incomeTotal) * 100).toFixed(1) : 0;
+              const color = incomeColors[index % incomeColors.length];
+              return `
+                <tr style="border-bottom:1px solid var(--border);">
+                  <td style="padding:8px 4px;">
+                    <span style="display:inline-block; width:12px; height:12px; background:${color}; border-radius:2px; margin-right:8px; vertical-align:middle;"></span>
+                    ${category}
+                  </td>
+                  <td style="padding:8px 4px; text-align:right; font-weight:600; color:var(--success);">${fmt(amount)}</td>
+                  <td style="padding:8px 4px; text-align:right; color:var(--text-muted);">${percentage}%</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
     }
   }
   
-  // Calculate comparison stats
-  let comparisonHTML = '';
-  const isCurrentWeek = getWeekStart(todayStr()) === weekStart;
-  
-  if (isCurrentWeek) {
-    const allTxns = await db.transactions.toArray();
+  // Expense Pie Chart
+  const expenseCtx = document.getElementById('expense-pie-chart');
+  if (expenseCtx && window.Chart && Object.keys(expenseByCategory).length > 0) {
+    const expenseColors = [
+      '#E74C3C', '#3498DB', '#F39C12', '#9B59B6', '#1ABC9C', '#E67E22',
+      '#34495E', '#16A085', '#D35400', '#8E44AD', '#27AE60', '#2980B9'
+    ];
     
-    // Last week
-    const lastWeekStart = addDays(weekStart, -7);
-    let lastWeekIncome = 0;
-    for (let i = 0; i < 7; i++) {
-      const d = addDays(lastWeekStart, i);
-      const dayIncome = allTxns
-        .filter(t => t.date === d && t.type === 'INCOME')
-        .reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-      lastWeekIncome += dayIncome;
-    }
-    
-    // 4 weeks ago (monthly comparison)
-    const fourWeeksStart = addDays(weekStart, -28);
-    let fourWeeksIncome = 0;
-    for (let i = 0; i < 7; i++) {
-      const d = addDays(fourWeeksStart, i);
-      const dayIncome = allTxns
-        .filter(t => t.date === d && t.type === 'INCOME')
-        .reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-      fourWeeksIncome += dayIncome;
-    }
-    
-    const totalCurrentIncome = weeklyIncome + weeklyTips;
-    
-    const calcChange = (current, previous) => {
-      if (previous === 0) return current > 0 ? 100 : 0;
-      return ((current - previous) / previous) * 100;
-    };
-    
-    const vsLastWeek = calcChange(totalCurrentIncome, lastWeekIncome);
-    const vsFourWeeks = calcChange(totalCurrentIncome, fourWeeksIncome);
-    
-    const formatChange = (change, prevAmount) => {
-      if (prevAmount === 0 && change === 0) {
-        return '<span style="color:var(--text-muted); font-size:14px;">No data</span>';
+    new Chart(expenseCtx, {
+      type: 'pie',
+      data: {
+        labels: Object.keys(expenseByCategory),
+        datasets: [{
+          data: Object.values(expenseByCategory),
+          backgroundColor: expenseColors
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.label || '';
+                const value = context.parsed || 0;
+                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                return `${label}: $${value.toFixed(2)} (${percentage}%)`;
+              }
+            }
+          }
+        }
       }
-      const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
-      const color = change > 0 ? '#2D7A4C' : change < 0 ? '#C13838' : '#999';
-      const percent = Math.abs(change).toFixed(0);
-      return `
-        <div style="color:${color};">
-          <span class="comparison-arrow">${arrow}</span><span class="comparison-percent">${percent}%</span>
-        </div>
-      `;
-    };
+    });
     
-    comparisonHTML = `
-      <div class="comparison-cards" style="margin-top:16px;">
-        <div class="comparison-card">
-          <div class="comparison-label">vs Last Week</div>
-          <div class="comparison-value">${formatChange(vsLastWeek, lastWeekIncome)}</div>
-          <div class="comparison-amount">${fmt(lastWeekIncome)}</div>
+    // Generate expense summary table
+    const expenseTotal = Object.values(expenseByCategory).reduce((a, b) => a + b, 0);
+    const expenseSummary = document.getElementById('expense-summary');
+    if (expenseSummary) {
+      const sortedExpense = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1]);
+      expenseSummary.innerHTML = `
+        <table style="width:100%; font-size:13px; border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border); text-align:left;">
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted);">Category</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">Amount</th>
+              <th style="padding:8px 4px; font-weight:600; color:var(--text-muted); text-align:right;">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sortedExpense.map(([category, amount], index) => {
+              const percentage = expenseTotal > 0 ? ((amount / expenseTotal) * 100).toFixed(1) : 0;
+              const color = expenseColors[index % expenseColors.length];
+              return `
+                <tr style="border-bottom:1px solid var(--border);">
+                  <td style="padding:8px 4px;">
+                    <span style="display:inline-block; width:12px; height:12px; background:${color}; border-radius:2px; margin-right:8px; vertical-align:middle;"></span>
+                    ${category}
+                  </td>
+                  <td style="padding:8px 4px; text-align:right; font-weight:600; color:var(--danger);">${fmt(amount)}</td>
+                  <td style="padding:8px 4px; text-align:right; color:var(--text-muted);">${percentage}%</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+  }
+}
+
+async function renderCategoryReport(el) {
+  const startDate = document.getElementById('cat-start')?.value || '2024-01-01';
+  const endDate = document.getElementById('cat-end')?.value || todayStr();
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;gap:12px;margin-bottom:24px;">
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">Start Date</label>
+          <input type="date" id="cat-start" class="form-input" value="${startDate}" onchange="renderReportsView()">
         </div>
-        <div class="comparison-card">
-          <div class="comparison-label">vs 4 Weeks Ago</div>
-          <div class="comparison-value">${formatChange(vsFourWeeks, fourWeeksIncome)}</div>
-          <div class="comparison-amount">${fmt(fourWeeksIncome)}</div>
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">End Date</label>
+          <input type="date" id="cat-end" class="form-input" value="${endDate}" onchange="renderReportsView()">
+        </div>
+      </div>
+      <div id="cat-report-content">Loading...</div>
+    </div>
+  `;
+  
+  const allTxns = await db.transactions.toArray();
+  const rangeTxns = allTxns.filter(t => t.date >= startDate && t.date <= endDate);
+  
+  const incomeByCategory = {};
+  const expenseByCategory = {};
+  
+  rangeTxns.forEach(t => {
+    const cat = t.category || 'Other';
+    if (t.type === 'INCOME') {
+      incomeByCategory[cat] = (incomeByCategory[cat] || 0) + (t.serviceAmount||0) + (t.tipAmount||0);
+    } else {
+      expenseByCategory[cat] = (expenseByCategory[cat] || 0) + (t.amount||0);
+    }
+  });
+  
+  const totalIncome = Object.values(incomeByCategory).reduce((a,b) => a+b, 0);
+  const totalExpense = Object.values(expenseByCategory).reduce((a,b) => a+b, 0);
+  
+  const catContent = document.getElementById('cat-report-content');
+  if (catContent) {
+    catContent.innerHTML = `
+      <div class="summary-grid" style="margin-bottom:24px;">
+        <div class="summary-card">
+          <div class="summary-label">Total Income</div>
+          <div class="summary-amount positive">${fmt(totalIncome)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Total Expenses</div>
+          <div class="summary-amount negative">${fmt(totalExpense)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Net</div>
+          <div class="summary-amount ${totalIncome - totalExpense >= 0 ? 'positive' : 'negative'}">${fmt(totalIncome - totalExpense)}</div>
+        </div>
+      </div>
+      
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px;">
+        <div class="card">
+          <h4 style="margin-bottom:16px;">Income by Category</h4>
+          <table class="data-table">
+            <thead><tr><th>Category</th><th>Amount</th><th>%</th></tr></thead>
+            <tbody>
+              ${Object.entries(incomeByCategory).sort((a,b) => b[1]-a[1]).map(([cat, amt]) => `
+                <tr>
+                  <td>${cat}</td>
+                  <td style="color:var(--success)">${fmt(amt)}</td>
+                  <td>${totalIncome > 0 ? ((amt/totalIncome)*100).toFixed(1) : 0}%</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h4 style="margin-bottom:16px;">Expenses by Category</h4>
+          <table class="data-table">
+            <thead><tr><th>Category</th><th>Amount</th><th>%</th></tr></thead>
+            <tbody>
+              ${Object.entries(expenseByCategory).sort((a,b) => b[1]-a[1]).map(([cat, amt]) => `
+                <tr>
+                  <td>${cat}</td>
+                  <td style="color:var(--danger)">${fmt(amt)}</td>
+                  <td>${totalExpense > 0 ? ((amt/totalExpense)*100).toFixed(1) : 0}%</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
         </div>
       </div>
     `;
   }
-
-  document.getElementById('report-output').innerHTML = `
-    <div class="report-section-title">Week of ${formatDateShort(weekStart)}</div>
-    <div class="report-stat-grid">
-      <div class="report-stat"><div class="report-stat-label">Total Income</div><div class="report-stat-value green">${fmt(weeklyIncome)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Tips</div><div class="report-stat-value gold">${fmt(weeklyTips)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Expenses</div><div class="report-stat-value red">${fmt(weeklyExp)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Net</div><div class="report-stat-value plum">${fmt(weeklyIncome+weeklyTips-weeklyExp)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Clients</div><div class="report-stat-value">${weeklyClients}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Avg/Client</div><div class="report-stat-value">${weeklyClients>0?fmt((weeklyIncome+weeklyTips)/weeklyClients):'—'}</div></div>
-    </div>
-    ${comparisonHTML}
-    ${rows.length > 0 ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Daily Breakdown</div>
-      ${rows.map(r=>`
-        <div class="report-row">
-          <div>
-            <div class="report-row-label">${formatDateShort(r.d)}</div>
-            <div class="report-row-sub">${r.cls} clients</div>
-          </div>
-          <div style="text-align:right">
-            <div class="report-row-value income">+${fmt(r.inc+r.tips)}</div>
-            <div style="font-size:12px; color:var(--danger)">-${fmt(r.exp)}</div>
-          </div>
-        </div>
-      `).join('')}
-    </div>
-    ` : '<p style="color:var(--text-muted);text-align:center;padding:30px 0;">No data for this week.</p>'}
-  `;
 }
 
-// ---- Monthly Report ----
-async function runMonthlyReport() {
-  const month = parseInt(document.getElementById('r-month')?.value) || state.selectedMonth;
-  const year  = parseInt(document.getElementById('r-year')?.value)  || state.selectedYear;
-
-  const monthStr = `${year}-${String(month).padStart(2,'0')}`;
-  const allTxns  = await db.transactions.toArray();
-  const txns     = allTxns.filter(t => t.date && t.date.startsWith(monthStr));
-  const allMExps = await db.monthlyExpenses.toArray();
-  const mExps    = allMExps.filter(e => e.year === year && e.month === month);
-  const sums     = await db.dailySummary.toArray();
-
-  const income   = txns.filter(t => t.type === 'INCOME');
-  const dExpense = txns.filter(t => t.type === 'EXPENSE');
-
-  const svcTotal  = income.reduce((s,t)=>s+(t.serviceAmount||0),0);
-  const tipTotal  = income.reduce((s,t)=>s+(t.tipAmount||0),0);
-  const dExpTotal = dExpense.reduce((s,t)=>s+(t.amount||0),0);
-  const mExpTotal = mExps.reduce((s,e)=>s+(e.amount||0),0);
-  const totalExp  = dExpTotal + mExpTotal;
-
-  const allRentPmts = await db.rentPayments.toArray();
-  const monthRent   = allRentPmts.filter(p => p.datePaid && p.datePaid.startsWith(monthStr));
-  const rentTotal   = monthRent.reduce((s,p)=>s+(p.amount||0),0);
-  const renters     = await db.renters.where('status').equals('active').toArray();
-  const expectedRent = renters.reduce((s,r)=>s+(r.weeklyRate||0),0) * 4;
-
-  const net       = svcTotal + tipTotal + rentTotal - totalExp;
-
-  const monthSums    = sums.filter(s => s.date && s.date.startsWith(monthStr));
-  const totalClients = monthSums.reduce((s,d)=>s+(d.clientsSeen||0),0);
-  const totalHours   = monthSums.reduce((s,d)=>s+(d.hoursWorked||0),0);
-
-  document.getElementById('report-output').innerHTML = `
-    <div class="report-section-title">${monthName(month)} ${year}</div>
-    <div class="report-stat-grid">
-      <div class="report-stat"><div class="report-stat-label">Services</div><div class="report-stat-value green">${fmt(svcTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Tips</div><div class="report-stat-value gold">${fmt(tipTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Booth Rent</div><div class="report-stat-value green">${fmt(rentTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Daily Exp</div><div class="report-stat-value red">${fmt(dExpTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Monthly Exp</div><div class="report-stat-value red">${fmt(mExpTotal)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Net Profit</div><div class="report-stat-value plum">${fmt(net)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Clients</div><div class="report-stat-value">${totalClients}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Hours</div><div class="report-stat-value">${totalHours}</div></div>
+async function renderAnnualReport(el) {
+  const year = state.selectedYear || new Date().getFullYear();
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+        <button class="btn-secondary" onclick="state.selectedYear--; renderReportsView()">← Prev Year</button>
+        <select class="form-select" style="width:auto;" onchange="state.selectedYear=parseInt(this.value); renderReportsView()">
+          ${[2023,2024,2025,2026,2027].map(y => 
+            `<option value="${y}" ${y === year ? 'selected' : ''}>${y}</option>`
+          ).join('')}
+        </select>
+        <button class="btn-secondary" onclick="state.selectedYear++; renderReportsView()">Next Year →</button>
+      </div>
+      <div id="annual-content">Loading...</div>
     </div>
-
-    ${(svcTotal + tipTotal + rentTotal) > 0 ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Income Sources</div>
-      <div class="pie-chart-wrap">
-        <canvas id="pie-monthly-income" width="260" height="260"></canvas>
-      </div>
-    </div>` : ''}
-
-    ${totalExp > 0 ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Expense Breakdown</div>
-      <div class="pie-chart-wrap">
-        <canvas id="pie-monthly-exp" width="260" height="260"></canvas>
-      </div>
-    </div>` : ''}
-
-    ${rentTotal > 0 ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Booth Rent Collected</div>
-      <div class="report-row"><div class="report-row-label">Collected</div><div class="report-row-value income">+${fmt(rentTotal)}</div></div>
-      <div class="report-row"><div class="report-row-label">Payments</div><div class="report-row-value">${monthRent.length}</div></div>
-    </div>` : ''}
-    ${mExps.length > 0 ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Fixed Monthly Expenses</div>
-      ${mExps.map(e=>`
-        <div class="report-row">
-          <div class="report-row-label">${e.category}</div>
-          <div class="report-row-value expense">-${fmt(e.amount)}</div>
-        </div>
-      `).join('')}
-    </div>` : ''}
   `;
-
-  // Income sources pie
-  if ((svcTotal + tipTotal + rentTotal) > 0) {
-        const incLabels = [], incVals = [];
-    if (svcTotal  > 0) { incLabels.push('Services');    incVals.push(svcTotal); }
-    if (tipTotal  > 0) { incLabels.push('Tips');        incVals.push(tipTotal); }
-    if (rentTotal > 0) { incLabels.push('Booth Rent');  incVals.push(rentTotal); }
-    drawPie('pie-monthly-income', incLabels, incVals);
-  } else {
-    }
-
-  // Expense breakdown pie — daily exp by category + monthly exp by category
-  if (totalExp > 0) {
-        const expMap = {};
-    dExpense.forEach(t => {
-      expMap[t.category] = (expMap[t.category]||0) + (t.amount||0);
-    });
-    mExps.forEach(e => {
-      expMap[e.category] = (expMap[e.category]||0) + (e.amount||0);
-    });
-    const expEntries = Object.entries(expMap).sort((a,b)=>b[1]-a[1]);
-      drawPie('pie-monthly-exp', expEntries.map(([k])=>k), expEntries.map(([,v])=>v));
-  } else {
-    }
-}
-
-// ---- Annual Report ----
-async function runAnnualReport() {
-  const year = parseInt(document.getElementById('r-annual-year')?.value) || state.selectedYear;
-
+  
   const allTxns = await db.transactions.toArray();
   const allMExp = await db.monthlyExpenses.toArray();
-  const allSums = await db.dailySummary.toArray();
-  const allRentPmts = await db.rentPayments.toArray();
-
-  let yearIncome=0, yearTips=0, yearExp=0, yearClients=0, yearRent=0;
+  
+  let yearIncome=0, yearTips=0, yearExp=0;
   const rows = [];
-
+  
   for (let m = 1; m <= 12; m++) {
-    const ms    = `${year}-${String(m).padStart(2,'0')}`;
-    const txns  = allTxns.filter(t => t.date?.startsWith(ms));
+    const ms = `${year}-${String(m).padStart(2,'0')}`;
+    const txns = allTxns.filter(t => t.date?.startsWith(ms));
     const mExps = allMExp.filter(e => e.year === year && e.month === m);
-    const inc   = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
-    const tips  = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
-    const dExp  = txns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
-    const mExp  = mExps.reduce((s,e)=>s+(e.amount||0),0);
-    const rent  = allRentPmts.filter(p=>p.datePaid?.startsWith(ms)).reduce((s,p)=>s+(p.amount||0),0);
-    const cls   = allSums.filter(s=>s.date?.startsWith(ms)).reduce((s,d)=>s+(d.clientsSeen||0),0);
-    yearIncome  += inc;
-    yearTips    += tips;
-    yearExp     += dExp + mExp;
-    yearClients += cls;
-    yearRent    += rent;
-    rows.push({ m, inc, tips, rent, dExp, mExp, cls, net: inc+tips+rent-dExp-mExp });
+    const inc = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
+    const tips = txns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
+    const dExp = txns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
+    const mExp = mExps.reduce((s,e)=>s+(e.amount||0),0);
+    yearIncome += inc;
+    yearTips += tips;
+    yearExp += dExp + mExp;
+    rows.push({ m, inc, tips, dExp, mExp, net: inc+tips-dExp-mExp });
   }
-
-  document.getElementById('report-output').innerHTML = `
-    <div class="report-section-title">${year} Annual Summary</div>
-    <div class="report-stat-grid">
-      <div class="report-stat"><div class="report-stat-label">Services</div><div class="report-stat-value green">${fmt(yearIncome)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Tips</div><div class="report-stat-value gold">${fmt(yearTips)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Booth Rent</div><div class="report-stat-value green">${fmt(yearRent)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Expenses</div><div class="report-stat-value red">${fmt(yearExp)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Net Profit</div><div class="report-stat-value plum">${fmt(yearIncome+yearTips+yearRent-yearExp)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Clients</div><div class="report-stat-value">${yearClients}</div></div>
-    </div>
-    <div class="report-white-card">
-      <div class="report-section-title">Monthly Breakdown</div>
-      ${rows.map(r=>`
-        <div class="report-row">
-          <div>
-            <div class="report-row-label">${monthName(r.m)}</div>
-            <div class="report-row-sub">${r.cls} clients${r.rent>0?` · rent +${fmt(r.rent)}`:''}</div>
-          </div>
-          <div style="text-align:right">
-            <div class="report-row-value income">+${fmt(r.inc+r.tips+r.rent)}</div>
-            <div style="font-size:12px; color:var(--danger)">exp -${fmt(r.dExp+r.mExp)}</div>
-            <div style="font-size:12px; color:var(--plum); font-weight:600">net ${fmt(r.net)}</div>
-          </div>
+  
+  const annualContent = document.getElementById('annual-content');
+  if (annualContent) {
+    annualContent.innerHTML = `
+      <div class="summary-grid" style="margin-bottom:24px;">
+        <div class="summary-card">
+          <div class="summary-label">Services</div>
+          <div class="summary-amount positive">${fmt(yearIncome)}</div>
         </div>
-      `).join('')}
-    </div>
-  `;
+        <div class="summary-card">
+          <div class="summary-label">Tips</div>
+          <div class="summary-amount positive">${fmt(yearTips)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Expenses</div>
+          <div class="summary-amount negative">${fmt(yearExp)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Net Profit</div>
+          <div class="summary-amount ${yearIncome+yearTips-yearExp >= 0 ? 'positive' : 'negative'}">${fmt(yearIncome+yearTips-yearExp)}</div>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h4 style="margin-bottom:16px;">Monthly Breakdown</h4>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Income</th>
+              <th>Tips</th>
+              <th>Expenses</th>
+              <th>Net</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${monthName(r.m)}</td>
+                <td style="color:var(--success)">${fmt(r.inc)}</td>
+                <td style="color:var(--success)">${fmt(r.tips)}</td>
+                <td style="color:var(--danger)">${fmt(r.dExp+r.mExp)}</td>
+                <td style="font-weight:600; color:${r.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(r.net)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
 }
 
-// ---- Year Over Year Report ----
-async function runYOYReport() {
-  const y1 = parseInt(document.getElementById('r-yoy-year1')?.value);
-  const y2 = parseInt(document.getElementById('r-yoy-year2')?.value);
-  if (!y1 || !y2) return;
-
+async function renderYOYReport(el) {
+  const currentYear = new Date().getFullYear();
+  const y1 = state.yoyYear1 || currentYear - 1;
+  const y2 = state.yoyYear2 || currentYear;
+  
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="display:flex;gap:12px;margin-bottom:24px;">
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">Year 1</label>
+          <select class="form-select" id="yoy-year1" onchange="state.yoyYear1=parseInt(this.value); renderReportsView()">
+            ${[2023,2024,2025,2026,2027].map(y => 
+              `<option value="${y}" ${y === y1 ? 'selected' : ''}>${y}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">Year 2</label>
+          <select class="form-select" id="yoy-year2" onchange="state.yoyYear2=parseInt(this.value); renderReportsView()">
+            ${[2023,2024,2025,2026,2027].map(y => 
+              `<option value="${y}" ${y === y2 ? 'selected' : ''}>${y}</option>`
+            ).join('')}
+          </select>
+        </div>
+      </div>
+      <div id="yoy-content">Loading...</div>
+    </div>
+  `;
+  
   async function yearTotals(year) {
-    const txns  = await db.transactions.toArray();
+    const txns = await db.transactions.toArray();
     const yTxns = txns.filter(t => t.date?.startsWith(String(year)));
     const mExps = await db.monthlyExpenses.toArray();
     const yMExp = mExps.filter(e => e.year === year);
-    const inc   = yTxns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
-    const tips  = yTxns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
-    const dExp  = yTxns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
-    const mExp  = yMExp.reduce((s,e)=>s+(e.amount||0),0);
-    const sums  = await db.dailySummary.toArray();
-    const cls   = sums.filter(s=>s.date?.startsWith(String(year))).reduce((s,d)=>s+(d.clientsSeen||0),0);
-    return { inc, tips, exp: dExp+mExp, net: inc+tips-dExp-mExp, cls };
+    const inc = yTxns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.serviceAmount||0),0);
+    const tips = yTxns.filter(t=>t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
+    const dExp = yTxns.filter(t=>t.type==='EXPENSE').reduce((s,t)=>s+(t.amount||0),0);
+    const mExp = yMExp.reduce((s,e)=>s+(e.amount||0),0);
+    return { inc, tips, exp: dExp+mExp, net: inc+tips-dExp-mExp };
   }
-
+  
   const [a, b] = await Promise.all([yearTotals(y1), yearTotals(y2)]);
-
+  
   const diff = (v1, v2) => {
     if (v1 === 0) return '';
-    const pct   = ((v2-v1)/Math.abs(v1)*100).toFixed(1);
+    const pct = ((v2-v1)/Math.abs(v1)*100).toFixed(1);
     const arrow = v2 >= v1 ? '▲' : '▼';
-    const color = v2 >= v1 ? 'green' : 'red';
-    return `<span style="color:var(--${color}); font-size:12px; margin-left:6px">${arrow} ${Math.abs(pct)}%</span>`;
+    const color = v2 >= v1 ? 'var(--success)' : 'var(--danger)';
+    return `<span style="color:${color}; font-size:12px; margin-left:6px">${arrow} ${Math.abs(pct)}%</span>`;
   };
-
-  document.getElementById('report-output').innerHTML = `
-    <div class="report-white-card">
-      <div class="report-section-title">Year Over Year Comparison</div>
-      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; text-align:center; font-size:13px; color:var(--text-muted); font-weight:600; padding-bottom:8px; border-bottom:1px solid var(--border);">
-        <span></span><span>${y1}</span><span>${y2}</span>
+  
+  const yoyContent = document.getElementById('yoy-content');
+  if (yoyContent) {
+    yoyContent.innerHTML = `
+      <div class="card">
+        <h4 style="margin-bottom:16px;">Year Over Year Comparison</h4>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>${y1}</th>
+              <th>${y2}</th>
+              <th>Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Income</td>
+              <td style="color:var(--success)">${fmt(a.inc)}</td>
+              <td style="color:var(--success)">${fmt(b.inc)}</td>
+              <td>${diff(a.inc, b.inc)}</td>
+            </tr>
+            <tr>
+              <td>Tips</td>
+              <td style="color:var(--success)">${fmt(a.tips)}</td>
+              <td style="color:var(--success)">${fmt(b.tips)}</td>
+              <td>${diff(a.tips, b.tips)}</td>
+            </tr>
+            <tr>
+              <td>Expenses</td>
+              <td style="color:var(--danger)">${fmt(a.exp)}</td>
+              <td style="color:var(--danger)">${fmt(b.exp)}</td>
+              <td>${diff(a.exp, b.exp)}</td>
+            </tr>
+            <tr style="font-weight:600;">
+              <td>Net Profit</td>
+              <td style="color:${a.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(a.net)}</td>
+              <td style="color:${b.net >= 0 ? 'var(--success)' : 'var(--danger)'}">${fmt(b.net)}</td>
+              <td>${diff(a.net, b.net)}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      ${[
-        ['Income',   fmt(a.inc),  fmt(b.inc),  diff(a.inc, b.inc)],
-        ['Tips',     fmt(a.tips), fmt(b.tips), diff(a.tips, b.tips)],
-        ['Expenses', fmt(a.exp),  fmt(b.exp),  diff(a.exp, b.exp)],
-        ['Net',      fmt(a.net),  fmt(b.net),  diff(a.net, b.net)],
-        ['Clients',  a.cls,       b.cls,       diff(a.cls, b.cls)],
-      ].map(([label, v1, v2, ch]) => `
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; align-items:center; padding:10px 0; border-bottom:1px solid var(--border); font-size:14px;">
-          <span style="color:var(--text-muted); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.5px;">${label}</span>
-          <span style="text-align:center; font-weight:600;">${v1}</span>
-          <span style="text-align:center; font-weight:600;">${v2}${ch}</span>
+    `;
+  }
+}
+
+async function renderExportReport(el) {
+  el.innerHTML = `
+    <div style="margin:20px 0;">
+      <div style="max-width:600px;">
+        <h4 style="margin-bottom:16px;">Export Data to CSV</h4>
+        <p style="color:var(--text-muted); margin-bottom:24px;">
+          Export your transaction data for use in Excel, Google Sheets, or other spreadsheet applications.
+        </p>
+        
+        <div style="display:flex;gap:12px;margin-bottom:24px;">
+          <div class="form-group" style="margin:0; flex:1;">
+            <label class="form-label">Start Date</label>
+            <input type="date" id="export-start" class="form-input" value="${addDays(todayStr(), -30)}">
+          </div>
+          <div class="form-group" style="margin:0; flex:1;">
+            <label class="form-label">End Date</label>
+            <input type="date" id="export-end" class="form-input" value="${todayStr()}">
+          </div>
         </div>
-      `).join('')}
+        
+        <button class="btn-primary" onclick="exportToCSV()">
+          📥 Download CSV File
+        </button>
+      </div>
     </div>
   `;
 }
 
-// ---- Category Report ----
-async function runCategoryReport() {
-  const from = document.getElementById('r-cat-from')?.value;
-  const to   = document.getElementById('r-cat-to')?.value;
-  if (!from || !to) return;
-
-  // Get daily transactions
-  const allTxns = await db.transactions.toArray();
-  const txns    = allTxns.filter(t => t.date >= from && t.date <= to);
-
-  // Get monthly expenses
-  const allMonthlyExp = await db.monthlyExpenses.toArray();
-  const monthlyExp = allMonthlyExp.filter(e => {
-    if (!e.month) return false;
-    // Convert month (YYYY-MM) to date for comparison
-    const monthDate = e.month + '-01';
-    return monthDate >= from && monthDate <= to;
-  });
-
-  const incMap = {}, expMap = {};
+async function exportToCSV() {
+  const from = document.getElementById('export-start')?.value;
+  const to = document.getElementById('export-end')?.value;
   
-  // Add income from daily transactions
-  txns.filter(t=>t.type==='INCOME').forEach(t => {
-    incMap[t.category] = (incMap[t.category]||0) + (t.serviceAmount||0) + (t.tipAmount||0);
-  });
-  
-  // Add expenses from daily transactions
-  txns.filter(t=>t.type==='EXPENSE').forEach(t => {
-    expMap[t.category] = (expMap[t.category]||0) + (t.amount||0);
-  });
-  
-  // Add monthly expenses
-  monthlyExp.forEach(e => {
-    expMap[e.category] = (expMap[e.category]||0) + (e.amount||0);
-  });
-
-  const sortDesc = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1]);
-  const hasInc   = Object.keys(incMap).length > 0;
-  const hasExp   = Object.keys(expMap).length > 0;
-
-  document.getElementById('report-output').innerHTML = `
-    <div style="font-size:13px; color:var(--text-muted); padding: 4px 0 12px;">${from} — ${to}</div>
-
-    ${hasInc ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Income by Category</div>
-      <div class="pie-chart-wrap">
-        <canvas id="pie-income" width="260" height="260"></canvas>
-      </div>
-      ${sortDesc(incMap).map(([k,v])=>`
-        <div class="report-row">
-          <div class="report-row-label">${k}</div>
-          <div class="report-row-value income">+${fmt(v)}</div>
-        </div>
-      `).join('')}
-    </div>` : ''}
-
-    ${hasExp ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Expenses by Category</div>
-      <div class="pie-chart-wrap">
-        <canvas id="pie-expense" width="260" height="260"></canvas>
-      </div>
-      ${sortDesc(expMap).map(([k,v])=>`
-        <div class="report-row">
-          <div class="report-row-label">${k}</div>
-          <div class="report-row-value expense">-${fmt(v)}</div>
-        </div>
-      `).join('')}
-    </div>` : ''}
-
-    ${!hasInc && !hasExp
-      ? '<p style="color:var(--text-muted);text-align:center;padding:30px 0;">No data for this date range.</p>'
-      : ''}
-  `;
-
-  // Draw after innerHTML is set so canvas elements exist in DOM
-  if (hasInc) {
-      const incEntries = sortDesc(incMap);
-      drawPie('pie-income', incEntries.map(([k])=>k), incEntries.map(([,v])=>v));
-  } else {
-    }
-  if (hasExp) {
-      const expEntries = sortDesc(expMap);
-      drawPie('pie-expense', expEntries.map(([k])=>k), expEntries.map(([,v])=>v));
-  } else {
-    }
-}
-
-// ----------------------------------------------------------------
-// 14. PIE CHART HELPER
-// ----------------------------------------------------------------
-
-// Tracks live Chart.js instances so we can destroy before re-drawing
-const _chartInstances = {};
-
-// Salon-brand colour palette for pie slices
-const PIE_COLORS = [
-  '#C9A84C', // gold
-  '#6B1A2A', // plum
-  '#7BCB8A', // green
-  '#C96B6B', // red/rose
-  '#6B9BC9', // blue
-  '#C96BA8', // pink
-  '#8BC96B', // lime
-  '#C9956B', // amber
-  '#6BC9C9', // teal
-  '#A86BC9', // purple
-];
-
-/**
- * Renders a doughnut chart into a <canvas id="canvasId">.
- * Call after setting innerHTML so the canvas exists in the DOM.
- * @param {string} canvasId
- * @param {string[]} labels
- * @param {number[]} values
- * @param {string} centerLabel  — small text shown below the canvas (optional)
- */
-function drawPie(canvasId, labels, values, centerLabel) {
-  
-  // Check if Chart.js is loaded
-  if (typeof Chart === 'undefined') {
-    console.error('Chart.js not loaded');
+  if (!from || !to) {
+    showToast('Please select a date range');
     return;
   }
   
-  if (_chartInstances[canvasId]) {
-      _chartInstances[canvasId].destroy();
-    delete _chartInstances[canvasId];
-  }
-  const canvas = document.getElementById(canvasId);
-  if (!canvas) {
-    console.warn(`Canvas not found: ${canvasId}`);
-    return;
-  }
-  const ctx = canvas.getContext('2d');
-
-  try {
-    _chartInstances[canvasId] = new Chart(ctx, {
-    type: 'doughnut',
-    data: {
-      labels,
-      datasets: [{
-        data:            values,
-        backgroundColor: PIE_COLORS.slice(0, values.length),
-        borderColor:     '#fff',
-        borderWidth:     2,
-        hoverOffset:     6,
-      }],
-    },
-    options: {
-      responsive:          true,
-      maintainAspectRatio: true,
-      cutout:              '58%',
-      plugins: {
-        legend: {
-          position:  'bottom',
-          labels: {
-            color:      '#5C3A4A',
-            font:       { size: 11, family: "'DM Sans', sans-serif" },
-            padding:    10,
-            boxWidth:   12,
-            boxHeight:  12,
-          },
-        },
-        tooltip: {
-          callbacks: {
-            label: ctx => {
-              const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
-              const pct   = total > 0 ? ((ctx.parsed / total) * 100).toFixed(1) : 0;
-              return ` ${ctx.label}: ${fmt(ctx.parsed)} (${pct}%)`;
-            },
-          },
-        },
-      },
-    },
-  });
-  } catch (err) {
-    console.error('Chart creation failed:', err);
-  }
-}
-
-async function exportCSV() {
-  const from = document.getElementById('r-exp-from')?.value;
-  const to   = document.getElementById('r-exp-to')?.value;
-  if (!from || !to) { alert('Please select a date range.'); return; }
-
   const allTxns = await db.transactions.toArray();
-  const txns    = allTxns.filter(t => t.date >= from && t.date <= to);
-  const mExps   = await db.monthlyExpenses.toArray();
-
+  const txns = allTxns.filter(t => t.date >= from && t.date <= to);
+  const mExps = await db.monthlyExpenses.toArray();
+  
   let csv = 'Date,Type,Category,Service Amount,Tip Amount,Tip Method,Payment Method,Notes\n';
-
+  
   txns.forEach(t => {
     const row = [
       t.date,
@@ -1990,1244 +1636,930 @@ async function exportCSV() {
       t.category || '',
       t.type === 'INCOME' ? (t.serviceAmount || 0) : (t.amount || 0),
       t.type === 'INCOME' ? (t.tipAmount || 0) : '',
-      t.type === 'INCOME' ? (t.tipMethod  || '') : '',
+      t.type === 'INCOME' ? (t.tipMethod || '') : '',
       t.paymentMethod || '',
-      (t.notes || '').replace(/,/g, ';'),
+      (t.notes || '').replace(/,/g, ';')
     ];
     csv += row.join(',') + '\n';
   });
-
+  
   csv += '\n\nMonthly Expenses:\nYear,Month,Category,Amount,Notes\n';
   mExps.filter(e => {
     const d = `${e.year}-${String(e.month).padStart(2,'0')}-01`;
     return d >= from && d <= to;
   }).forEach(e => {
-    csv += `${e.year},${monthName(e.month)},${e.category},${e.amount},"${e.notes||''}"\n`;
+    const row = [
+      e.year,
+      e.month,
+      e.category || '',
+      e.amount || 0,
+      (e.notes || '').replace(/,/g, ';')
+    ];
+    csv += row.join(',') + '\n';
   });
-
-  const renters   = await db.renters.toArray();
-  const renterMap = {};
-  renters.forEach(r => { renterMap[r.id] = r.name; });
-  const rentPmts = await db.rentPayments.toArray();
-  const filteredRent = rentPmts.filter(p => p.datePaid >= from && p.datePaid <= to);
-  if (filteredRent.length > 0) {
-    csv += '\n\nBooth Rent Payments:\nDate Paid,Renter,Week Of,Amount,Method,Notes\n';
-    filteredRent.forEach(p => {
-      csv += `${p.datePaid},"${renterMap[p.renterId] || 'Unknown'}",${p.weekStart},${p.amount},${p.paymentMethod || ''},"${p.notes || ''}"\n`;
-    });
-  }
-
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `salon-books-${from}-to-${to}.csv`;
+  
+  // Download CSV
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `salon-data-${from}-to-${to}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast('CSV downloaded ✓');
-}
-
-// ----------------------------------------------------------------
-// 15. SETTINGS VIEW
-// ----------------------------------------------------------------
-
-async function renderSettingsView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = '';
-
-  const bizName = await db.settings.get('businessName');
-  const pinSet  = await db.settings.get('pin');
-  const pinOn   = await db.settings.get('pinEnabled');
+  window.URL.revokeObjectURL(url);
   
-  // Get renters tab status
-  const rentersOverride = await db.settings.get('showRentersTab');
-  const allRenters = await db.renters.toArray();
-  let rentersStatus;
-  if (!rentersOverride || rentersOverride.value === undefined) {
-    rentersStatus = allRenters.length > 0 
-      ? 'Auto (shown — you have renters)' 
-      : 'Auto (hidden — no renters yet)';
-  } else if (rentersOverride.value === 'true') {
-    rentersStatus = 'Always shown';
-  } else {
-    rentersStatus = 'Always hidden';
-  }
-
-  content.innerHTML = `
-    <!-- Business Name -->
-    <div class="settings-section">
-      <div class="settings-label">Business</div>
-      <div class="card" style="margin-bottom: 8px;">
-        <label class="form-label" style="margin-bottom:8px;">Business Name</label>
-        <input type="text" class="business-name-input" id="biz-name"
-          placeholder="e.g. Annette's Salon"
-          value="${bizName ? bizName.value : ''}">
-        <button class="btn-add-chip" style="width:100%;margin-top:10px;" onclick="saveBusinessName()">Save Name</button>
-      </div>
-    </div>
-
-    <!-- Categories -->
-    <div class="settings-section">
-      <div class="settings-label">Income Categories</div>
-      <div class="card" style="margin-bottom: 8px;">
-        <div id="income-cats"></div>
-        <div class="add-category-row">
-          <input type="text" class="add-category-input" id="new-income-cat" placeholder="Add category…">
-          <button class="btn-add-chip" onclick="addCategory('INCOME')">+ Add</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <div class="settings-label">Expense Categories</div>
-      <div class="card" style="margin-bottom: 8px;">
-        <div id="all-exp-cats"></div>
-        <div class="add-category-row">
-          <input type="text" class="add-category-input" id="new-exp-cat" placeholder="Add category…">
-          <button class="btn-add-chip" onclick="addCategory('EXPENSE')">+ Add</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- PIN Lock -->
-    <div class="settings-section">
-      <div class="settings-label">Security</div>
-      <div class="settings-item" onclick="openPINSettings()">
-        <div>
-          <div class="settings-item-label">${pinSet ? 'Change PIN' : 'Set Up PIN Lock'}</div>
-          <div class="settings-item-sub">${pinOn?.value === 'true' ? 'PIN lock is ON' : 'PIN lock is OFF'}</div>
-        </div>
-        <span class="settings-item-arrow">›</span>
-      </div>
-      ${pinSet ? `
-      <div class="settings-item">
-        <div>
-          <div class="settings-item-label">PIN Lock</div>
-          <div class="settings-item-sub">Require PIN on startup</div>
-        </div>
-        <label class="toggle" onclick="event.stopPropagation()">
-          <input type="checkbox" ${pinOn?.value === 'true' ? 'checked' : ''} onchange="togglePINLock()">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-      ` : ''}
-    </div>
-
-    <!-- Features -->
-    <div class="settings-section">
-      <div class="settings-label">Features</div>
-      <div class="settings-item">
-        <div>
-          <div class="settings-item-label">Show Booth Renters Tab</div>
-          <div class="settings-item-sub">${rentersStatus}</div>
-        </div>
-        <label class="toggle" onclick="event.stopPropagation()">
-          <input type="checkbox" id="renters-tab-toggle" ${state.showRentersTab ? 'checked' : ''} onchange="toggleRentersTab()">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-    </div>
-
-    <!-- Backup & Restore -->
-    <div class="settings-section">
-      <div class="settings-label">Local Backup</div>
-      <div class="card" style="margin-bottom:8px;">
-        <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;">
-          Export your data to a JSON file. Save it to Google Drive or email it to yourself as an extra safety net alongside automatic cloud sync.
-        </div>
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
-          Last local export: <strong style="color:var(--plum);" id="last-backup-display">Loading…</strong>
-        </div>
-        <button class="btn-primary" style="width:100%;margin-bottom:8px;" onclick="exportBackup()">
-          ⬇ Export Backup File
-        </button>
-        <button class="btn-secondary" style="width:100%;" onclick="triggerRestoreFilePicker()">
-          ⬆ Restore from Backup File
-        </button>
-        <div style="font-size:11px;color:var(--danger);margin-top:8px;text-align:center;">
-          Restore replaces all current data with the backup file.
-        </div>
-      </div>
-    </div>
-
-    <div style="height: 24px;"></div>
-
-    <!-- App Updates -->
-    <div class="settings-section">
-      <div class="settings-label">App Updates</div>
-      <div class="card" style="margin-bottom:8px;">
-        <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;">
-          If you don't see the latest changes, use one of these options:
-        </div>
-        <button class="btn-secondary" style="width:100%;margin-bottom:8px;" onclick="reloadApp()">
-          🔄 Reload App
-        </button>
-        <button class="btn-secondary" style="width:100%;background:#C13838;color:white;" onclick="forceReload()">
-          ⚡ Force Clear & Reload
-        </button>
-        <div style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.4;">
-          "Force Clear" removes all cached data and does a clean reload. Use this if updates aren't appearing.
-        </div>
-      </div>
-    </div>
-
-    <div style="height: 24px;"></div>
-
-    <!-- Account -->
-    <div class="settings-section">
-      <div class="settings-label">Account</div>
-      <div class="card" style="margin-bottom:8px;">
-        <div style="font-size:13px;color:var(--text-muted);margin-bottom:4px;">Signed in as</div>
-        <div style="font-size:14px;font-weight:600;color:var(--plum);margin-bottom:16px;">${currentUser?.email || ''}</div>
-        <button class="btn-secondary" style="width:100%;" onclick="signOutUser()">
-          Sign Out
-        </button>
-      </div>
-    </div>
-
-    <div style="height: 24px;"></div>
-  `;
-
-  if (!document.getElementById('restore-file-input')) {
-    const inp = document.createElement('input');
-    inp.type = 'file';
-    inp.id   = 'restore-file-input';
-    inp.accept = '.json';
-    inp.style.display = 'none';
-    inp.addEventListener('change', e => importBackup(e.target.files[0]));
-    document.body.appendChild(inp);
-  }
-
-  loadCategoryChips();
-
-  const lastBackup = await db.settings.get('lastBackup');
-  const el = document.getElementById('last-backup-display');
-  if (el) {
-    el.textContent = lastBackup?.value
-      ? formatDateDisplay(lastBackup.value)
-      : 'Never';
-    if (!lastBackup?.value) el.style.color = 'var(--danger)';
-  }
+  showToast('CSV file downloaded!');
 }
 
-async function saveBusinessName() {
-  const val = document.getElementById('biz-name').value.trim();
-  if (!val) return;
-  await db.settings.put({ key: 'businessName', value: val });
-  showToast('Business name saved ✓');
-}
 
-function loadCategoryChips() {
-  // Income categories
-  const incomeEl = document.getElementById('income-cats');
-  if (incomeEl) {
-    incomeEl.innerHTML = (state.categories.INCOME || []).map(name =>
-      `<span class="category-chip">${name}
-        <button class="chip-delete" onclick="deleteCategory('INCOME','${name.replace(/'/g,"\\'")}')">×</button>
-      </span>`
-    ).join('');
-  }
-  
-  // Combined expense categories (daily + monthly)
-  const expenseEl = document.getElementById('all-exp-cats');
-  if (expenseEl) {
-    const dailyExpenses = state.categories.DAILY_EXPENSE || [];
-    const monthlyExpenses = state.categories.MONTHLY_EXPENSE || [];
-    const allExpenses = [...dailyExpenses, ...monthlyExpenses];
-    
-    expenseEl.innerHTML = allExpenses.map(name => {
-      // Determine which type this category belongs to
-      const type = dailyExpenses.includes(name) ? 'DAILY_EXPENSE' : 'MONTHLY_EXPENSE';
-      return `<span class="category-chip">${name}
-        <button class="chip-delete" onclick="deleteCategory('${type}','${name.replace(/'/g,"\\'")}')">×</button>
-      </span>`;
-    }).join('');
-  }
-}
-
-async function addCategory(type) {
-  const inputMap = { 
-    INCOME: 'new-income-cat', 
-    EXPENSE: 'new-exp-cat',
-    DAILY_EXPENSE: 'new-dexp-cat', 
-    MONTHLY_EXPENSE: 'new-mexp-cat' 
-  };
-  const inputId = inputMap[type];
-  const input   = document.getElementById(inputId);
-  const name    = input?.value.trim();
-  if (!name) return;
-  
-  // For generic 'EXPENSE', default to DAILY_EXPENSE
-  const actualType = type === 'EXPENSE' ? 'DAILY_EXPENSE' : type;
-  
-  if (state.categories[actualType].includes(name)) { 
-    showToast('Already exists'); 
-    return; 
-  }
-  
-  state.categories[actualType].push(name);
-  await saveCategories();
-  input.value = '';
-  showToast(`"${name}" added ✓`);
-  loadCategoryChips();
-}
-
-async function deleteCategory(type, name) {
-  if (!confirm(`Remove "${name}"?`)) return;
-  state.categories[type] = state.categories[type].filter(n => n !== name);
-  await saveCategories();
-  loadCategoryChips();
-}
-
-// ----------------------------------------------------------------
-// 16. PIN SYSTEM
-// ----------------------------------------------------------------
-
-function openPINSettings() {
-  openModal(`
-    <h2 class="modal-title">Set PIN</h2>
-    <p style="color:var(--text-muted); font-size:14px; margin-bottom:20px;">Choose a 4-digit PIN to secure the app.</p>
-    <div class="form-group">
-      <label class="form-label">New PIN (4 digits)</label>
-      <input type="password" class="form-input" id="new-pin" maxlength="4" inputmode="numeric" placeholder="••••">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Confirm PIN</label>
-      <input type="password" class="form-input" id="confirm-pin" maxlength="4" inputmode="numeric" placeholder="••••">
-    </div>
-    <button class="btn-submit" onclick="savePIN()">Set PIN</button>
-  `);
-}
-
-async function savePIN() {
-  const p1 = document.getElementById('new-pin').value;
-  const p2 = document.getElementById('confirm-pin').value;
-  if (p1.length !== 4 || !/^\d{4}$/.test(p1)) { alert('PIN must be exactly 4 digits.'); return; }
-  if (p1 !== p2) { alert('PINs do not match. Try again.'); return; }
-  await db.settings.put({ key: 'pin', value: p1 });
-  await db.settings.put({ key: 'pinEnabled', value: 'true' });
-  closeModal();
-  showToast('PIN set ✓');
-  renderSettingsView();
-}
-
-async function togglePINLock() {
-  const current = await db.settings.get('pinEnabled');
-  const newVal  = current?.value === 'true' ? 'false' : 'true';
-  await db.settings.put({ key: 'pinEnabled', value: newVal });
-  renderSettingsView();
-}
-
-async function toggleRentersTab() {
-  const override = await db.settings.get('showRentersTab');
-  const allRenters = await db.renters.toArray();
-  const wasHidden = !state.showRentersTab;
-  
-  // Cycle through: Auto → Always Show → Always Hide → Auto
-  let newValue;
-  let message;
-  let newStatus;
-  
-  if (!override || override.value === undefined) {
-    // Currently Auto → switch to Always Show
-    newValue = 'true';
-    message = 'Renters tab set to Always Show';
-    newStatus = 'Always shown';
-    state.showRentersTab = true;
-  } else if (override.value === 'true') {
-    // Currently Always Show → switch to Always Hide
-    newValue = 'false';
-    message = 'Renters tab set to Always Hide';
-    newStatus = 'Always hidden';
-    state.showRentersTab = false;
-  } else {
-    // Currently Always Hide → back to Auto
-    await db.settings.delete('showRentersTab');
-    state.showRentersTab = allRenters.length > 0;
-    newStatus = allRenters.length > 0 
-      ? 'Auto (shown — you have renters)' 
-      : 'Auto (hidden — no renters yet)';
-    showToast('Renters tab set to Auto');
-    
-    // Update the status text directly if on settings page
-    const statusEl = document.querySelector('.settings-item .settings-item-sub');
-    if (statusEl && state.currentView === 'settings') {
-      statusEl.textContent = newStatus;
-      // Update checkbox
-      const checkbox = document.getElementById('renters-tab-toggle');
-      if (checkbox) checkbox.checked = state.showRentersTab;
-    }
-    
-    navigate(state.currentView);
-    return;
-  }
-  
-  // Save to database and wait for it to complete
-  await db.settings.put({ key: 'showRentersTab', value: newValue });
-  
-  showToast(message);
-  
-  // Update the status text directly if on settings page (avoids re-render cache issues)
-  const statusEl = document.querySelector('.settings-item .settings-item-sub');
-  if (statusEl && state.currentView === 'settings') {
-    statusEl.textContent = newStatus;
-    // Update checkbox
-    const checkbox = document.getElementById('renters-tab-toggle');
-    if (checkbox) checkbox.checked = state.showRentersTab;
-  }
-  
-  // Update navigation
-  if (wasHidden && state.showRentersTab) {
-    navigate('renters');
-  } else {
-    navigate(state.currentView);
-  }
-}
-
-let pinBuffer = '';
-let pinPadInitialized = false; // Prevent duplicate event listeners
-
-function initPINPad() {
-  if (pinPadInitialized) return; // Already initialized
-  
-  document.querySelectorAll('.pin-btn[data-num]').forEach(btn => {
-    btn.addEventListener('click', () => enterPin(btn.dataset.num));
-  });
-  document.getElementById('pin-back')?.addEventListener('click', clearPin);
-  
-  pinPadInitialized = true;
-}
-
-function enterPin(num) {
-  if (pinBuffer.length >= 4) return;
-  pinBuffer += num;
-  updatePinDots();
-  if (pinBuffer.length === 4) {
-    setTimeout(checkPin, 150);
-  }
-}
-
-function clearPin() {
-  pinBuffer = pinBuffer.slice(0, -1);
-  updatePinDots();
-  document.getElementById('pin-error').classList.add('hidden');
-}
-
-function updatePinDots() {
-  for (let i = 0; i < 4; i++) {
-    document.getElementById(`dot-${i}`)?.classList.toggle('filled', i < pinBuffer.length);
-  }
-}
-
-async function checkPin() {
-  const stored = await db.settings.get('pin');
-  
-  if (stored && pinBuffer === stored.value) {
-      try {
-      document.getElementById('pin-screen').classList.add('hidden');
-      document.getElementById('app').classList.remove('hidden');
-      
-          
-      // Call navigate to update tab visibility and render the view
-      navigate('daily');
-      
-          
-      // Give renderDailyView a moment to complete
-      // (navigate is sync but calls async renderDailyView)
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-        } catch (err) {
-      console.error('Error after PIN entry:', err);
-      showToast('Error loading app — please refresh');
-    }
-  } else {
-      document.getElementById('pin-error').classList.remove('hidden');
-    pinBuffer = '';
-    updatePinDots();
-  }
-}
-
-// ----------------------------------------------------------------
-// 17. RENTERS VIEW
-// ----------------------------------------------------------------
-
-// Week date helpers
-function getWeekDue(weekStart) { return addDays(weekStart, 5); } // Saturday
-function nextWeekStart(ws) { return addDays(ws, 7); }
-function prevWeekStart(ws) { return addDays(ws, -7); }
-
-function formatWeekRange(ws) {
-  const end = addDays(ws, 6);
-  const s   = new Date(ws  + 'T12:00:00');
-  const e   = new Date(end + 'T12:00:00');
-  const opts = { month: 'short', day: 'numeric' };
-  return s.toLocaleDateString('en-US', opts) + ' – ' + e.toLocaleDateString('en-US', opts);
-}
-
-function getRentStatus(weekStart, datePaid) {
-  if (!datePaid) return 'unpaid';
-  const due  = new Date(getWeekDue(weekStart) + 'T23:59:59');
-  const paid = new Date(datePaid + 'T12:00:00');
-  return paid <= due ? 'ontime' : 'late';
-}
+// ============================================================
+// RENTERS VIEW
+// ============================================================
 
 async function renderRentersView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = `
-    <button class="header-icon-btn" onclick="openAddRenterModal()" title="Add Renter">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-      </svg>
-    </button>`;
-
-  if (!state.rentersWeekStart) {
-    state.rentersWeekStart = getWeekStart(todayStr());
-  }
-
-  const ws       = state.rentersWeekStart;
-  const weekDue  = getWeekDue(ws);
-  const renters  = await db.renters.where('status').equals('active').toArray();
-  const payments = await db.rentPayments.where('weekStart').equals(ws).toArray();
-
-  const payMap = {};
-  payments.forEach(p => { payMap[p.renterId] = p; });
-
-  const expectedTotal  = renters.reduce((s, r) => s + (r.weeklyRate || 0), 0);
-  const collectedTotal = payments.reduce((s, p) => s + (p.amount || 0), 0);
-  const outstanding    = expectedTotal - collectedTotal;
-
-  const isCurrentWeek = ws === getWeekStart(todayStr());
-
+  const content = document.getElementById('content');
+  const renters = await db.renters.toArray();
+  
   content.innerHTML = `
-    <div class="daily-date-bar">
-      <button class="date-nav-btn" onclick="rentersChangeWeek(-1)">‹</button>
-      <div class="current-date">Week of ${formatWeekRange(ws)}</div>
-      <button class="date-nav-btn" onclick="rentersChangeWeek(1)" ${isCurrentWeek ? 'disabled style="opacity:0.3"' : ''}>›</button>
+    <div class="page-header">
+      <h2 class="page-title">Booth Renters</h2>
+      <p class="page-subtitle">Manage your booth renters</p>
+      <button class="btn-primary" style="margin-top:12px;" onclick="openAddRenterModal()">+ Add Renter</button>
     </div>
-
-    <div class="renters-summary">
-      <div class="renters-sum-item">
-        <div class="renters-sum-label">Expected</div>
-        <div class="renters-sum-value">${fmt(expectedTotal)}</div>
-      </div>
-      <div class="renters-sum-divider"></div>
-      <div class="renters-sum-item">
-        <div class="renters-sum-label">Collected</div>
-        <div class="renters-sum-value" style="color:var(--success)">${fmt(collectedTotal)}</div>
-      </div>
-      <div class="renters-sum-divider"></div>
-      <div class="renters-sum-item">
-        <div class="renters-sum-label">Outstanding</div>
-        <div class="renters-sum-value" style="color:${outstanding > 0 ? 'var(--danger)' : 'var(--success)'}">
-          ${outstanding > 0 ? fmt(outstanding) : '✓ Paid'}
-        </div>
-      </div>
+    
+    <div class="card">
+      ${renters.length === 0 ? '<p style="text-align:center; color:var(--text-muted); padding:40px;">No renters yet</p>' : `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Weekly Rent</th>
+              <th>Start Date</th>
+              <th>Phone</th>
+              <th>Notes</th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renters.map(r => `
+              <tr>
+                <td style="font-weight:600;">${r.name}</td>
+                <td>${fmt(r.weeklyRent || 0)}</td>
+                <td>${r.startDate || '—'}</td>
+                <td>${r.phone || '—'}</td>
+                <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis;">${r.notes || '—'}</td>
+                <td><button class="btn-secondary" style="padding:6px 12px; font-size:12px;" onclick="openEditRenterModal('${r.id}')">Edit</button></td>
+                <td><button class="btn-danger" style="padding:6px 12px; font-size:12px;" onclick="deleteRenter('${r.id}')">Delete</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `}
     </div>
-
-    <div class="renters-due-note">Rent due Saturday ${formatDateDisplay(weekDue)}</div>
-
-    <div id="renter-list">
-      ${renters.length === 0 ? `
-        <div class="empty-state" style="padding:40px 20px;">
-          <div style="font-size:36px;margin-bottom:12px;">👥</div>
-          <div style="font-weight:600;color:var(--plum);margin-bottom:6px;">No booth renters yet</div>
-          <div style="color:var(--text-muted);font-size:14px;">Tap + to add your first renter</div>
-        </div>` :
-        renters.map(r => {
-          const p           = payMap[r.id];
-          const status      = p ? getRentStatus(ws, p.datePaid) : 'unpaid';
-          const statusLabel = { ontime: 'On Time', late: 'Late', unpaid: 'Unpaid' }[status];
-          const statusClass = { ontime: 'status-ontime', late: 'status-late', unpaid: 'status-unpaid' }[status];
-          const icon        = { ontime: '✅', late: '⚠️', unpaid: '○' }[status];
-          return `
-          <div class="renter-row" onclick="openRenterDetail('${r.id}')">
-            <div class="renter-icon">${icon}</div>
-            <div class="renter-info">
-              <div class="renter-name">${r.name}${r.booth ? ` <span class="renter-booth">Booth ${r.booth}</span>` : ''}</div>
-              <div class="renter-meta">
-                ${p
-                  ? `Paid ${formatDateDisplay(p.datePaid)} · ${p.paymentMethod} · <span class="${statusClass}">${statusLabel}</span>`
-                  : `<span class="${statusClass}">Not yet paid</span> · Due ${fmt(r.weeklyRate || 0)}`}
-              </div>
-            </div>
-            <div class="renter-amount">
-              <div style="font-weight:700;color:${p ? 'var(--success)' : 'var(--text-muted)'}">${p ? fmt(p.amount) : fmt(r.weeklyRate || 0)}</div>
-              ${!p ? `<button class="renter-pay-btn" onclick="event.stopPropagation();openLogPaymentModal('${r.id}')">Log Payment</button>` : ''}
-            </div>
-          </div>`;
-        }).join('')
-      }
-    </div>
-    <div style="height:20px;"></div>
   `;
-}
-
-function rentersChangeWeek(dir) {
-  state.rentersWeekStart = dir === 1
-    ? nextWeekStart(state.rentersWeekStart)
-    : prevWeekStart(state.rentersWeekStart);
-  renderRentersView();
-}
-
-function openLogPaymentModal(renterId) {
-  db.renters.get(renterId).then(r => {
-    if (!r) return;
-    openModal(`
-      <h2 class="modal-title">Log Rent Payment</h2>
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:14px;">${r.name} · Week of ${formatWeekRange(state.rentersWeekStart)}</p>
-
-      <label class="form-label">Amount Paid ($)</label>
-      <input type="number" inputmode="decimal" class="form-input" id="rp-amount"
-        value="${r.weeklyRate || 140}" step="0.01" min="0">
-
-      <label class="form-label">Date Paid</label>
-      <input type="date" class="form-input" id="rp-date" value="${todayStr()}">
-
-      <label class="form-label">Payment Method</label>
-      <select class="form-select" id="rp-method">
-        <option>Cash</option>
-        <option>Venmo</option>
-        <option>Zelle</option>
-        <option>Card</option>
-        <option>Check</option>
-        <option>Other</option>
-      </select>
-
-      <label class="form-label">Notes (optional)</label>
-      <input type="text" class="form-input" id="rp-notes" placeholder="Any notes…">
-
-      <button class="btn-primary" style="width:100%;margin-top:8px;" onclick="saveRentPayment('${renterId}')">Save Payment</button>
-    `);
-  });
-}
-
-async function saveRentPayment(renterId) {
-  const amount  = parseFloat(document.getElementById('rp-amount').value);
-  const datePaid = document.getElementById('rp-date').value;
-  const method  = document.getElementById('rp-method').value;
-  const notes   = document.getElementById('rp-notes').value.trim();
-
-  if (!amount || !datePaid) { showToast('Please fill in amount and date'); return; }
-
-  const ws = state.rentersWeekStart;
-
-  // Check if payment already exists for this renter + week
-  const existing = await db.rentPayments
-    .where('renterId').equals(renterId)
-    .filter(p => p.weekStart === ws)
-    .first();
-
-  if (existing) {
-    await db.rentPayments.update(existing.id, { amount, datePaid, paymentMethod: method, notes });
-  } else {
-    await db.rentPayments.add({
-      renterId,
-      weekStart:     ws,
-      amount,
-      datePaid,
-      paymentMethod: method,
-      notes,
-    });
-  }
-
-  closeModal();
-  showToast('Payment saved ✓');
-  renderRentersView();
-}
-
-function openRenterDetail(renterId) {
-  db.renters.get(renterId).then(async r => {
-    if (!r) return;
-    const payments = await db.rentPayments
-      .where('renterId').equals(renterId)
-      .reverse()
-      .limit(20)
-      .toArray();
-
-    const historyHTML = payments.length === 0
-      ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0;">No payment history yet.</p>'
-      : payments.map(p => {
-          const status      = getRentStatus(p.weekStart, p.datePaid);
-          const statusClass = { ontime: 'status-ontime', late: 'status-late' }[status];
-          const icon        = status === 'ontime' ? '✅' : '⚠️';
-          return `
-          <div class="renter-history-row">
-            <span>${icon}</span>
-            <div style="flex:1">
-              <div style="font-size:12px;font-weight:500;">${formatWeekRange(p.weekStart)}</div>
-              <div style="font-size:11px;color:var(--text-muted);">Paid ${formatDateDisplay(p.datePaid)} · ${p.paymentMethod}</div>
-            </div>
-            <div style="text-align:right">
-              <div style="font-weight:700;color:var(--success);font-size:13px;">${fmt(p.amount)}</div>
-              <div class="${statusClass}" style="font-size:10px;">${status === 'ontime' ? 'On Time' : 'Late'}</div>
-            </div>
-          </div>`;
-        }).join('');
-
-    openModal(`
-      <h2 class="modal-title">${r.name}</h2>
-      <div style="display:flex;gap:12px;margin-bottom:14px;font-size:13px;color:var(--text-muted);">
-        ${r.booth ? `<span>Booth ${r.booth}</span>` : ''}
-        <span>${fmt(r.weeklyRate || 0)}/week</span>
-        <span>Since ${r.startDate ? formatDateDisplay(r.startDate) : '—'}</span>
-      </div>
-
-      <div style="display:flex;gap:8px;margin-bottom:16px;">
-        <button class="btn-secondary" style="flex:1;" onclick="openLogPaymentModal('${r.id}');closeModal()">+ Log Payment</button>
-        <button class="btn-secondary" style="flex:1;" onclick="openEditRenterModal('${r.id}')">Edit Profile</button>
-        <button class="btn-danger-sm" onclick="deactivateRenter('${r.id}')">Deactivate</button>
-      </div>
-
-      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:8px;">Payment History</div>
-      ${historyHTML}
-    `);
-  });
 }
 
 function openAddRenterModal() {
   openModal(`
     <h2 class="modal-title">Add Booth Renter</h2>
-
-    <label class="form-label">Name *</label>
-    <input type="text" class="form-input" id="nr-name" placeholder="First name or full name">
-
-    <label class="form-label">Booth #</label>
-    <input type="text" class="form-input" id="nr-booth" placeholder="e.g. 1, 2, 3…">
-
-    <label class="form-label">Weekly Rate ($)</label>
-    <input type="number" inputmode="decimal" class="form-input" id="nr-rate" value="140" step="0.01" min="0">
-
-    <label class="form-label">Start Date</label>
-    <input type="date" class="form-input" id="nr-start" value="${todayStr()}">
-
-    <label class="form-label">Notes (optional)</label>
-    <input type="text" class="form-input" id="nr-notes" placeholder="Any notes about this renter…">
-
-    <button class="btn-primary" style="width:100%;margin-top:8px;" onclick="saveNewRenter()">Add Renter</button>
+    <form onsubmit="saveNewRenter(); return false;">
+      <div class="form-group">
+        <label class="form-label">Name</label>
+        <input type="text" id="renter-name" class="form-input" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Weekly Rent</label>
+        <input type="number" id="renter-rent" class="form-input" step="0.01" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Start Date</label>
+        <input type="date" id="renter-start" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Phone</label>
+        <input type="tel" id="renter-phone" class="form-input">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <input type="text" id="renter-notes" class="form-input">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:24px;">
+        <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" style="flex:1;">Add Renter</button>
+      </div>
+    </form>
   `);
 }
 
 async function saveNewRenter() {
-  const name  = document.getElementById('nr-name').value.trim();
-  const booth = document.getElementById('nr-booth').value.trim();
-  const rate  = parseFloat(document.getElementById('nr-rate').value);
-  const start = document.getElementById('nr-start').value;
-  const notes = document.getElementById('nr-notes').value.trim();
-
-  if (!name) { showToast('Name is required'); return; }
-
-  await db.renters.add({
-    name,
-    booth:      booth || null,
-    weeklyRate: rate || 140,
-    startDate:  start,
-    notes,
-    status:     'active',
-  });
-
-  // Update tab visibility in case this is the first renter
-  await updateRentersTabVisibility();
+  const renter = {
+    userId: currentUser.uid,
+    name: document.getElementById('renter-name').value,
+    weeklyRent: parseFloat(document.getElementById('renter-rent').value) || 0,
+    startDate: document.getElementById('renter-start').value,
+    phone: document.getElementById('renter-phone').value,
+    notes: document.getElementById('renter-notes').value,
+    createdAt: firebase.firestore.Timestamp.now()
+  };
+  
+  const docRef = await firestore.collection('users').doc(currentUser.uid).collection('renters').add(renter);
+  await db.renters.put({ id: docRef.id, ...renter });
   
   closeModal();
-  showToast(`${name} added ✓`);
-  navigate('renters'); // Refresh nav bar + render view
-}
-
-function openEditRenterModal(renterId) {
-  db.renters.get(renterId).then(r => {
-    if (!r) return;
-    openModal(`
-      <h2 class="modal-title">Edit Renter</h2>
-
-      <label class="form-label">Name</label>
-      <input type="text" class="form-input" id="er-name" value="${r.name}">
-
-      <label class="form-label">Booth #</label>
-      <input type="text" class="form-input" id="er-booth" value="${r.booth || ''}">
-
-      <label class="form-label">Weekly Rate ($)</label>
-      <input type="number" inputmode="decimal" class="form-input" id="er-rate" value="${r.weeklyRate || 140}">
-
-      <label class="form-label">Notes</label>
-      <input type="text" class="form-input" id="er-notes" value="${r.notes || ''}">
-
-      <button class="btn-primary" style="width:100%;margin-top:8px;" onclick="saveEditRenter('${r.id}')">Save Changes</button>
-    `);
-  });
-}
-
-async function saveEditRenter(renterId) {
-  const name  = document.getElementById('er-name').value.trim();
-  const booth = document.getElementById('er-booth').value.trim();
-  const rate  = parseFloat(document.getElementById('er-rate').value);
-  const notes = document.getElementById('er-notes').value.trim();
-
-  if (!name) { showToast('Name is required'); return; }
-
-  await db.renters.update(renterId, { name, booth: booth || null, weeklyRate: rate, notes });
-  closeModal();
-  showToast('Renter updated ✓');
+  showToast('Renter added');
   renderRentersView();
 }
 
-async function deactivateRenter(renterId) {
-  const r = await db.renters.get(renterId);
+async function openEditRenterModal(id) {
+  const r = await db.renters.get(id);
   if (!r) return;
-  if (!confirm(`Deactivate ${r.name}? They will be hidden from the weekly view but their payment history is preserved.`)) return;
-  await db.renters.update(renterId, { status: 'inactive' });
+  
+  openModal(`
+    <h2 class="modal-title">Edit Renter</h2>
+    <form onsubmit="saveEditRenter('${id}'); return false;">
+      <div class="form-group">
+        <label class="form-label">Name</label>
+        <input type="text" id="edit-renter-name" class="form-input" value="${r.name}" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Weekly Rent</label>
+        <input type="number" id="edit-renter-rent" class="form-input" step="0.01" value="${r.weeklyRent || 0}" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Start Date</label>
+        <input type="date" id="edit-renter-start" class="form-input" value="${r.startDate || ''}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Phone</label>
+        <input type="tel" id="edit-renter-phone" class="form-input" value="${r.phone || ''}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <input type="text" id="edit-renter-notes" class="form-input" value="${r.notes || ''}">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:24px;">
+        <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" style="flex:1;">Save</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveEditRenter(id) {
+  const updates = {
+    name: document.getElementById('edit-renter-name').value,
+    weeklyRent: parseFloat(document.getElementById('edit-renter-rent').value) || 0,
+    startDate: document.getElementById('edit-renter-start').value,
+    phone: document.getElementById('edit-renter-phone').value,
+    notes: document.getElementById('edit-renter-notes').value
+  };
+  
+  await firestore.collection('users').doc(currentUser.uid).collection('renters').doc(id).update(updates);
+  await db.renters.update(id, updates);
+  
   closeModal();
-  showToast(`${r.name} deactivated`);
+  showToast('Renter updated');
   renderRentersView();
 }
 
-// ----------------------------------------------------------------
-// 18. BACKUP & RESTORE
-// ----------------------------------------------------------------
-
-async function exportBackup() {
-  try {
-    const backup = {
-      exportDate:      todayStr(),
-      appVersion:      '5.0',
-      businessName:    (await db.settings.get('businessName'))?.value || '',
-      categories:      state.categories,
-      transactions:    await db.transactions.toArray(),
-      dailySummary:    await db.dailySummary.toArray(),
-      monthlyExpenses: await db.monthlyExpenses.toArray(),
-      renters:         await db.renters.toArray(),
-      rentPayments:    await db.rentPayments.toArray(),
-      settings:        await db.settings.toArray(),
-    };
-
-    const json = JSON.stringify(backup, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = `mane-frame-backup-${todayStr()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-
-    await db.settings.put({ key: 'lastBackup', value: todayStr() });
-    showToast('Backup exported ✓');
-    renderSettingsView();
-  } catch (err) {
-    showToast('Export failed — try again');
-    console.error(err);
-  }
-}
-
-async function importBackup(file) {
-  if (!file) return;
-
-  const confirmed = confirm(
-    '⚠️ Restore from backup?\n\nThis will REPLACE all current data with the backup file. This cannot be undone.\n\nAre you sure?'
-  );
+async function deleteRenter(id) {
+  const r = await db.renters.get(id);
+  if (!r) return;
+  
+  const message = `Are you sure you want to delete this renter?\n\n${r.name}\nWeekly Rent: ${fmt(r.weeklyRent || 0)}\n\nThis cannot be undone.`;
+  
+  const confirmed = await confirmDialog(message, 'Confirm Delete');
   if (!confirmed) return;
+  
+  await firestore.collection('users').doc(currentUser.uid).collection('renters').doc(id).delete();
+  await db.renters.delete(id);
+  
+  showToast('Renter deleted');
+  renderRentersView();
+}
 
-  try {
-    const text = await file.text();
-    const data = JSON.parse(text);
 
-    if (!data.transactions) { showToast('Invalid backup file'); return; }
+// ============================================================
+// SETTINGS VIEW
+// ============================================================
 
-    let catMap;
-    if (Array.isArray(data.categories)) {
-      catMap = { INCOME: [], DAILY_EXPENSE: [], MONTHLY_EXPENSE: [] };
-      data.categories.forEach(c => {
-        if (c.type && catMap[c.type]) catMap[c.type].push(c.name);
-      });
-    } else if (data.categories && typeof data.categories === 'object') {
-      catMap = data.categories;
-    } else {
-      catMap = _defaultCategoryMap();
+async function renderSettingsView() {
+  const content = document.getElementById('content');
+  
+  content.innerHTML = `
+    <div class="page-header">
+      <h2 class="page-title">Settings</h2>
+      <p class="page-subtitle">Manage categories and preferences</p>
+    </div>
+    
+    <div class="card">
+      <h3 style="font-size:18px; margin-bottom:16px;">Income Categories</h3>
+      <div id="income-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+        ${state.categories.INCOME.map((cat, idx) => `
+          <div class="category-tag">
+            ${cat}
+            <button onclick="removeCategory('INCOME', ${idx})" class="category-remove">×</button>
+          </div>
+        `).join('')}
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="new-income-cat" class="form-input" placeholder="New category name">
+        <button class="btn-primary" onclick="addCategory('INCOME')">Add</button>
+      </div>
+    </div>
+    
+    <div class="card" style="margin-top:16px;">
+      <h3 style="font-size:18px; margin-bottom:16px;">Daily Expense Categories</h3>
+      <div id="expense-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+        ${state.categories.DAILY_EXPENSE.map((cat, idx) => `
+          <div class="category-tag">
+            ${cat}
+            <button onclick="removeCategory('DAILY_EXPENSE', ${idx})" class="category-remove">×</button>
+          </div>
+        `).join('')}
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="new-expense-cat" class="form-input" placeholder="New category name">
+        <button class="btn-primary" onclick="addCategory('DAILY_EXPENSE')">Add</button>
+      </div>
+    </div>
+    
+    <div class="card" style="margin-top:16px;">
+      <h3 style="font-size:18px; margin-bottom:16px;">Monthly Expense Categories</h3>
+      <div id="monthly-expense-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+        ${state.categories.MONTHLY_EXPENSE.map((cat, idx) => `
+          <div class="category-tag">
+            ${cat}
+            <button onclick="removeCategory('MONTHLY_EXPENSE', ${idx})" class="category-remove">×</button>
+          </div>
+        `).join('')}
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="new-monthly-cat" class="form-input" placeholder="New category name">
+        <button class="btn-primary" onclick="addCategory('MONTHLY_EXPENSE')">Add</button>
+      </div>
+    </div>
+    
+    <div class="card" style="margin-top:16px;">
+      <h3 style="font-size:18px; margin-bottom:16px;">Import Historical Data</h3>
+      <p style="color:var(--text-muted); margin-bottom:16px;">
+        Import transactions from your historical data CSV file. This will add past transactions to your database.
+      </p>
+      <div id="import-stats" style="display:none; background:var(--bg-secondary); border-radius:8px; padding:16px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <div style="font-weight:600; margin-bottom:4px;">Imported Data Found</div>
+            <div style="font-size:14px; color:var(--text-muted);" id="import-stats-text"></div>
+          </div>
+          <button class="btn-danger" onclick="deleteImportedData()" style="white-space:nowrap;">
+            Delete Imported Data
+          </button>
+        </div>
+      </div>
+      
+      <div style="border: 2px dashed var(--border); border-radius:8px; padding:32px; text-align:center; background:var(--bg-secondary); margin-bottom:16px;">
+        <input type="file" id="csv-file-input" accept=".csv" style="display:none;" onchange="handleCSVUpload(event)">
+        <div id="drop-zone" style="cursor:pointer;" onclick="document.getElementById('csv-file-input').click()">
+          <div style="font-size:48px; margin-bottom:12px;">📄</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:8px;">
+            Click to select CSV file or drag & drop
+          </div>
+          <div style="font-size:14px; color:var(--text-muted);">
+            Accepts: .csv files
+          </div>
+        </div>
+      </div>
+      
+      <div id="import-status" style="display:none;">
+        <div style="margin-bottom:12px;">
+          <strong id="import-filename"></strong>
+        </div>
+        <div id="import-preview" style="margin-bottom:16px;"></div>
+        <div id="import-progress" style="display:none;">
+          <div style="background:var(--border); border-radius:4px; height:24px; overflow:hidden; margin-bottom:8px;">
+            <div id="progress-bar" style="background:var(--primary); height:100%; width:0%; transition:width 0.3s;"></div>
+          </div>
+          <div id="progress-text" style="text-align:center; font-size:14px; color:var(--text-muted);"></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:16px;">
+          <button id="import-btn" class="btn-primary" onclick="startImport()" style="flex:1;">
+            Import All
+          </button>
+          <button class="btn-secondary" onclick="cancelImport()" style="flex:1;">
+            Cancel
+          </button>
+        </div>
+      </div>
+      
+      <div id="import-complete" style="display:none; text-align:center; padding:32px;">
+        <div style="font-size:48px; margin-bottom:16px;">✅</div>
+        <div style="font-size:18px; font-weight:600; margin-bottom:8px;">Import Complete!</div>
+        <div id="import-summary" style="color:var(--text-muted); margin-bottom:16px;"></div>
+        <button class="btn-primary" onclick="navigate('reports'); state.reportType='weekly'; renderReportsView()">
+          View Reports →
+        </button>
+      </div>
+    </div>
+    
+    <div class="card" style="margin-top:16px; border:2px solid var(--danger);">
+      <h3 style="font-size:18px; margin-bottom:8px; color:var(--danger);">⚠️ Danger Zone</h3>
+      <p style="color:var(--text-muted); margin-bottom:16px; font-size:14px;">
+        Irreversible actions. These operations cannot be undone.
+      </p>
+      
+      <div style="background:#fff3cd; border:1px solid #ffc107; padding:16px; border-radius:8px; margin-bottom:16px;">
+        <div style="font-weight:600; margin-bottom:8px; color:#856404;">Delete All Data</div>
+        <p style="font-size:14px; color:#856404; margin-bottom:12px;">
+          This will permanently delete ALL data from your salon app including:
+        </p>
+        <ul style="font-size:13px; color:#856404; margin-bottom:12px; padding-left:20px;">
+          <li>All transactions (income and expenses)</li>
+          <li>All monthly expenses</li>
+          <li>All booth renters</li>
+          <li>All custom categories</li>
+          <li>Everything from Firebase and local storage</li>
+        </ul>
+        <p style="font-size:13px; color:#856404; font-weight:600;">
+          ⚠️ This action is PERMANENT and cannot be undone. Your account will be reset to empty.
+        </p>
+        <button class="btn-danger" onclick="initiateDeleteAllData()" style="margin-top:12px; width:100%;">
+          Delete All Data (Cannot Be Undone)
+        </button>
+      </div>
+    </div>
+    
+    <div class="card" style="margin-top:16px;">
+      <h3 style="font-size:18px; margin-bottom:16px;">About</h3>
+      <p style="margin-bottom:12px;">Mane Frame Salon - Desktop Edition</p>
+      <p style="margin-bottom:12px;">Data syncs automatically with mobile app</p>
+      <p style="color:var(--text-muted); font-size:14px;">Signed in as: ${currentUser?.email}</p>
+    </div>
+  `;
+  
+  // Check for existing imported data
+  checkImportedData();
+}
+
+function addCategory(type) {
+  let inputId;
+  if (type === 'INCOME') inputId = 'new-income-cat';
+  else if (type === 'DAILY_EXPENSE') inputId = 'new-expense-cat';
+  else if (type === 'MONTHLY_EXPENSE') inputId = 'new-monthly-cat';
+  
+  const input = document.getElementById(inputId);
+  const newCat = input.value.trim();
+  
+  if (!newCat) {
+    showToast('Please enter a category name');
+    return;
+  }
+  
+  if (state.categories[type].includes(newCat)) {
+    showToast('Category already exists');
+    return;
+  }
+  
+  state.categories[type].push(newCat);
+  saveCategories();
+  input.value = '';
+  renderSettingsView();
+}
+
+function removeCategory(type, index) {
+  if (!confirm('Remove this category?')) return;
+  
+  state.categories[type].splice(index, 1);
+  saveCategories();
+  renderSettingsView();
+}
+
+// ============================================================
+// KEYBOARD SHORTCUTS
+// ============================================================
+
+document.addEventListener('keydown', (e) => {
+  // Ignore if typing in input/textarea
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+    return;
+  }
+  
+  // Ctrl/Cmd+I - Quick add income
+  if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+    e.preventDefault();
+    if (state.currentView === 'daily') {
+      document.getElementById('quick-type').value = 'INCOME';
+      updateQuickForm();
+      document.getElementById('quick-amount').focus();
     }
-
-    // Strip integer id fields (Firestore uses string IDs)
-    const strip = arr => arr.map(({ id, ...rest }) => rest);
-
-    await db.transaction('rw',
-      db.transactions, db.dailySummary, db.monthlyExpenses,
-      db.renters, db.rentPayments, db.settings,
-      async () => {
-        await db.transactions.clear();
-        await db.dailySummary.clear();
-        await db.monthlyExpenses.clear();
-        await db.settings.clear();
-        if (data.renters)      await db.renters.clear();
-        if (data.rentPayments) await db.rentPayments.clear();
-
-        await db.transactions.bulkAdd(strip(data.transactions));
-        if (data.dailySummary?.length)    await db.dailySummary.bulkAdd(strip(data.dailySummary));
-        if (data.monthlyExpenses?.length) await db.monthlyExpenses.bulkAdd(strip(data.monthlyExpenses));
-        if (data.renters?.length)         await db.renters.bulkAdd(strip(data.renters));
-        if (data.rentPayments?.length)    await db.rentPayments.bulkAdd(strip(data.rentPayments));
-
-        if (data.settings?.length) await db.settings.bulkAdd(data.settings);
-      }
-    );
-
-    state.categories = catMap;
-    await saveCategories();
-    await db.settings.put({ key: 'lastBackup', value: todayStr() });
-
-    // Update tab visibility in case restored backup includes renters
-    await updateRentersTabVisibility();
-
-    showToast('Restore complete ✓');
+  }
+  
+  // Ctrl/Cmd+E - Quick add expense
+  if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
+    e.preventDefault();
+    if (state.currentView === 'daily') {
+      document.getElementById('quick-type').value = 'EXPENSE';
+      updateQuickForm();
+      document.getElementById('quick-amount').focus();
+    }
+  }
+  
+  // Ctrl/Cmd+D - Navigate to Daily
+  if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+    e.preventDefault();
     navigate('daily');
+  }
+  
+  // Ctrl/Cmd+M - Navigate to Monthly
+  if ((e.ctrlKey || e.metaKey) && e.key === 'm') {
+    e.preventDefault();
+    navigate('monthly');
+  }
+  
+  // Ctrl/Cmd+R - Navigate to Reports
+  if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+    e.preventDefault();
+    navigate('reports');
+  }
+});
 
-  } catch (err) {
-    showToast('Restore failed — file may be corrupt');
-    console.error(err);
+// ============================================================
+// CSV IMPORT FUNCTIONALITY
+// ============================================================
+
+let importData = null;
+
+async function checkImportedData() {
+  // Check if there are any imported transactions
+  const allTxns = await db.transactions.toArray();
+  const imported = allTxns.filter(t => t.imported === true);
+  
+  if (imported.length > 0) {
+    const statsEl = document.getElementById('import-stats');
+    const textEl = document.getElementById('import-stats-text');
+    
+    if (statsEl && textEl) {
+      const totalAmount = imported.reduce((sum, t) => sum + (t.serviceAmount || 0), 0);
+      const dates = imported.map(t => t.date).sort();
+      const minDate = dates[0];
+      const maxDate = dates[dates.length - 1];
+      
+      textEl.textContent = `${imported.length} transactions imported (${minDate} to ${maxDate}) - Total: ${fmt(totalAmount)}`;
+      statsEl.style.display = 'block';
+    }
   }
 }
 
-function triggerRestoreFilePicker() {
-  const input = document.getElementById('restore-file-input');
-  if (input) input.click();
+async function deleteImportedData() {
+  const confirmed = await confirmDialog(
+    'Are you sure you want to delete ALL imported historical data?\n\nThis will remove all transactions that were imported via CSV.\n\nThis cannot be undone.',
+    'Delete Imported Data'
+  );
+  
+  if (!confirmed) return;
+  
+  showToast('Deleting imported data...');
+  
+  try {
+    // Get all imported transactions
+    const allTxns = await db.transactions.toArray();
+    const imported = allTxns.filter(t => t.imported === true);
+    
+    let deleted = 0;
+    
+    // Delete from Firebase and IndexedDB
+    for (const txn of imported) {
+      try {
+        await firestore.collection('users').doc(currentUser.uid).collection('transactions').doc(txn.id).delete();
+        await db.transactions.delete(txn.id);
+        deleted++;
+      } catch (err) {
+        console.error('Error deleting transaction:', txn.id, err);
+      }
+    }
+    
+    showToast(`Deleted ${deleted} imported transactions`);
+    
+    // Refresh settings view
+    renderSettingsView();
+    
+  } catch (err) {
+    console.error('Error deleting imported data:', err);
+    showToast('Error deleting imported data');
+  }
 }
 
-// ----------------------------------------------------------------
-// 19. MODAL SYSTEM
-// ----------------------------------------------------------------
+function handleCSVUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  
+  document.getElementById('import-filename').textContent = file.name;
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    parseCSV(text);
+  };
+  reader.readAsText(file);
+}
 
-function openModal(html) {
-  document.getElementById('modal-content').innerHTML = html;
-  document.getElementById('modal-overlay').classList.remove('hidden');
-  document.getElementById('modal').classList.remove('hidden');
+function parseCSV(text) {
+  const lines = text.split('\n');
+  const headers = lines[0].split(',').map(h => h.trim());
+  
+  const data = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    
+    const values = lines[i].split(',').map(v => v.trim());
+    const row = {};
+    headers.forEach((header, index) => {
+      row[header] = values[index] || '';
+    });
+    
+    // Only add if has required fields
+    if (row.date && row.service) {
+      data.push(row);
+    }
+  }
+  
+  importData = data;
+  showImportPreview(data);
+}
+
+function showImportPreview(data) {
+  const cardCount = data.filter(d => d.payment_method === 'Card').length;
+  const checkCount = data.filter(d => d.payment_method === 'Check/Cash').length;
+  
+  const totalIncome = data.reduce((sum, d) => {
+    const amount = parseFloat(d.square_amount || d.estimated_price || 0);
+    return sum + amount;
+  }, 0);
+  
+  const totalTips = data.reduce((sum, d) => {
+    const tip = parseFloat(d.square_tip || 0);
+    return sum + tip;
+  }, 0);
+  
+  const previewHTML = `
+    <div style="background:var(--bg-secondary); border-radius:8px; padding:16px; margin-bottom:16px;">
+      <div style="font-weight:600; margin-bottom:12px;">Ready to Import:</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; font-size:14px;">
+        <div>
+          <div style="color:var(--text-muted);">Total Transactions:</div>
+          <div style="font-size:20px; font-weight:600;">${data.length}</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);">Total Income:</div>
+          <div style="font-size:20px; font-weight:600; color:var(--success);">${fmt(totalIncome)}</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);">Card Payments:</div>
+          <div style="font-weight:600;">${cardCount} (${(cardCount/data.length*100).toFixed(1)}%)</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);">Check/Cash:</div>
+          <div style="font-weight:600;">${checkCount} (${(checkCount/data.length*100).toFixed(1)}%)</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);">Total Tips:</div>
+          <div style="font-weight:600; color:var(--success);">${fmt(totalTips)}</div>
+        </div>
+        <div>
+          <div style="color:var(--text-muted);">Date Range:</div>
+          <div style="font-weight:600;">${data[0].date} to ${data[data.length-1].date}</div>
+        </div>
+      </div>
+    </div>
+    
+    <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:12px; border-radius:8px; font-size:14px; margin-bottom:16px;">
+      ⚠️ <strong>Note:</strong> Imported data can be deleted later via Settings if needed.
+      All imported transactions will be marked and can be reversed.
+    </div>
+  `;
+  
+  document.getElementById('import-preview').innerHTML = previewHTML;
+  document.getElementById('import-status').style.display = 'block';
+}
+
+async function startImport() {
+  if (!importData || importData.length === 0) {
+    showToast('No data to import');
+    return;
+  }
+  
+  // Disable import button
+  document.getElementById('import-btn').disabled = true;
+  document.getElementById('import-progress').style.display = 'block';
+  
+  let imported = 0;
+  let errors = 0;
+  const total = importData.length;
+  
+  // Get current timestamp for this import batch
+  const importTimestamp = firebase.firestore.Timestamp.now();
+  
+  // Map service names to categories
+  const serviceToCategory = (service) => {
+    const s = service.toLowerCase();
+    if (s.includes('highlight') || s.includes('color') || s.includes('root') || s.includes('glaze')) {
+      return 'Color';
+    } else if (s.includes('haircut') || s.includes('cut') || s.includes('trim') || s.includes('bang') || s.includes('shampoo') || s.includes('blowdry')) {
+      return 'Haircut';
+    } else if (s.includes('perm')) {
+      return 'Perm';
+    } else {
+      return 'Other';
+    }
+  };
+  
+  for (let i = 0; i < importData.length; i++) {
+    const row = importData[i];
+    
+    try {
+      // Determine type and amount
+      let type = 'INCOME';
+      let amount = 0;
+      let tipAmount = 0;
+      
+      if (row.payment_method === 'Card' && row.square_amount) {
+        amount = parseFloat(row.square_amount);
+        tipAmount = parseFloat(row.square_tip || 0);
+      } else {
+        amount = parseFloat(row.estimated_price || 0);
+      }
+      
+      if (amount === 0) {
+        errors++;
+        continue;
+      }
+      
+      // Create transaction - MARKED AS IMPORTED
+      const txn = {
+        userId: currentUser.uid,
+        date: row.date,
+        type: type,
+        category: serviceToCategory(row.service),
+        serviceAmount: amount,
+        tipAmount: tipAmount,
+        paymentMethod: row.payment_method === 'Card' ? 'Card' : 'Check',
+        notes: `${row.service} - Imported from historical data`,
+        imported: true,  // ← MARKED AS IMPORTED!
+        importedAt: importTimestamp,  // ← TIMESTAMP THIS IMPORT BATCH
+        createdAt: firebase.firestore.Timestamp.now()
+      };
+      
+      // Add to Firebase
+      const docRef = await firestore.collection('users').doc(currentUser.uid).collection('transactions').add(txn);
+      
+      // Add to IndexedDB
+      await db.transactions.put({ id: docRef.id, ...txn });
+      
+      imported++;
+      
+      // Update progress
+      const progress = (i + 1) / total * 100;
+      document.getElementById('progress-bar').style.width = progress + '%';
+      document.getElementById('progress-text').textContent = `Importing ${i + 1} of ${total}...`;
+      
+      // Small delay to prevent overwhelming Firebase
+      if (i % 10 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      
+    } catch (err) {
+      console.error('Error importing row:', row, err);
+      errors++;
+    }
+  }
+  
+  // Show completion
+  document.getElementById('import-status').style.display = 'none';
+  document.getElementById('import-complete').style.display = 'block';
+  document.getElementById('import-summary').innerHTML = `
+    Successfully imported <strong>${imported}</strong> transactions<br>
+    ${errors > 0 ? `<span style="color:var(--danger);">${errors} errors</span><br>` : ''}
+    <span style="font-size:13px; color:var(--text-muted);">
+      These transactions are marked as imported and can be deleted from Settings if needed.
+    </span>
+  `;
+  
+  showToast(`Imported ${imported} transactions!`);
+  
+  // Reset
+  importData = null;
+  document.getElementById('csv-file-input').value = '';
+}
+
+function cancelImport() {
+  importData = null;
+  document.getElementById('import-status').style.display = 'none';
+  document.getElementById('import-complete').style.display = 'none';
+  document.getElementById('csv-file-input').value = '';
+  showToast('Import cancelled');
+}
+
+// ============================================================
+// DELETE ALL DATA (DANGER ZONE)
+// ============================================================
+
+async function initiateDeleteAllData() {
+  // First warning - explain what will be deleted
+  openModal(`
+    <h2 class="modal-title" style="color:var(--danger);">⚠️ Delete All Data</h2>
+    <div style="margin-bottom:20px;">
+      <p style="margin-bottom:16px; font-weight:600;">
+        You are about to permanently delete ALL data from your salon app.
+      </p>
+      
+      <div style="background:var(--bg-secondary); padding:16px; border-radius:8px; margin-bottom:16px;">
+        <div style="font-weight:600; margin-bottom:12px;">This will delete:</div>
+        <ul style="padding-left:20px; margin-bottom:0;">
+          <li style="margin-bottom:8px;">All ${await db.transactions.count()} transactions</li>
+          <li style="margin-bottom:8px;">All ${await db.monthlyExpenses.count()} monthly expenses</li>
+          <li style="margin-bottom:8px;">All ${await db.renters.count()} booth renters</li>
+          <li style="margin-bottom:8px;">All custom income/expense categories</li>
+          <li style="margin-bottom:8px;">All data from Firebase cloud storage</li>
+          <li style="margin-bottom:8px;">All data from local storage</li>
+        </ul>
+      </div>
+      
+      <div style="background:#ffebee; border:2px solid var(--danger); padding:16px; border-radius:8px; margin-bottom:20px;">
+        <div style="color:var(--danger); font-weight:600; margin-bottom:8px;">
+          ⚠️ THIS ACTION CANNOT BE UNDONE
+        </div>
+        <div style="font-size:14px; color:#666;">
+          Once deleted, your data is gone forever. There is no backup or recovery option.
+          Make sure you have exported any reports you need before proceeding.
+        </div>
+      </div>
+    </div>
+    
+    <div style="display:flex; gap:8px;">
+      <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">
+        Cancel (Keep My Data)
+      </button>
+      <button type="button" class="btn-danger" style="flex:1;" onclick="confirmDeleteAllData()">
+        Continue to Delete
+      </button>
+    </div>
+  `);
+}
+
+function confirmDeleteAllData() {
+  // Second warning - type confirmation
+  openModal(`
+    <h2 class="modal-title" style="color:var(--danger);">⚠️ Final Confirmation Required</h2>
+    <div style="margin-bottom:20px;">
+      <p style="margin-bottom:16px;">
+        This is your last chance to cancel. All your salon data will be permanently deleted.
+      </p>
+      
+      <div style="background:#ffebee; border:2px solid var(--danger); padding:16px; border-radius:8px; margin-bottom:16px;">
+        <div style="color:var(--danger); font-weight:600; margin-bottom:8px; font-size:16px;">
+          ⚠️ THIS WILL DELETE EVERYTHING
+        </div>
+        <div style="font-size:14px; color:#666;">
+          To confirm, type <strong>DELETE ALL DATA</strong> in the box below:
+        </div>
+      </div>
+      
+      <div class="form-group">
+        <input 
+          type="text" 
+          id="delete-confirmation-input" 
+          class="form-input" 
+          placeholder="Type: DELETE ALL DATA"
+          style="border:2px solid var(--danger);"
+        >
+      </div>
+    </div>
+    
+    <div style="display:flex; gap:8px;">
+      <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">
+        Cancel (I Changed My Mind)
+      </button>
+      <button type="button" class="btn-danger" style="flex:1;" onclick="executeDeleteAllData()">
+        Permanently Delete Everything
+      </button>
+    </div>
+  `);
+  
+  // Focus the input
   setTimeout(() => {
-    const first = document.querySelector('#modal input, #modal select');
-    if (first) first.focus();
-  }, 300);
+    document.getElementById('delete-confirmation-input')?.focus();
+  }, 100);
 }
 
-function closeModal() {
-  document.getElementById('modal-overlay').classList.add('hidden');
-  document.getElementById('modal').classList.add('hidden');
-  document.getElementById('modal-content').innerHTML = '';
-}
-
-// Custom confirmation dialog (replaces browser's confirm)
-function confirmDialog(message, title = 'Mane Frame') {
-  return new Promise((resolve) => {
+async function executeDeleteAllData() {
+  // Check typed confirmation
+  const input = document.getElementById('delete-confirmation-input');
+  const typed = input?.value.trim();
+  
+  if (typed !== 'DELETE ALL DATA') {
+    showToast('Please type "DELETE ALL DATA" to confirm');
+    return;
+  }
+  
+  closeModal();
+  
+  // Show progress
+  openModal(`
+    <h2 class="modal-title">Deleting All Data...</h2>
+    <div style="text-align:center; padding:32px;">
+      <div style="font-size:48px; margin-bottom:16px;">🔄</div>
+      <div style="font-size:16px; margin-bottom:8px;">Deleting all data from database...</div>
+      <div style="font-size:14px; color:var(--text-muted);">Please wait, this may take a minute.</div>
+    </div>
+  `);
+  
+  try {
+    let deletedCount = 0;
+    
+    // Delete all transactions from Firebase
+    const txnsSnapshot = await firestore.collection('users').doc(currentUser.uid).collection('transactions').get();
+    for (const doc of txnsSnapshot.docs) {
+      await doc.ref.delete();
+      deletedCount++;
+    }
+    
+    // Delete all monthly expenses from Firebase
+    const expensesSnapshot = await firestore.collection('users').doc(currentUser.uid).collection('monthlyExpenses').get();
+    for (const doc of expensesSnapshot.docs) {
+      await doc.ref.delete();
+      deletedCount++;
+    }
+    
+    // Delete all renters from Firebase
+    const rentersSnapshot = await firestore.collection('users').doc(currentUser.uid).collection('renters').get();
+    for (const doc of rentersSnapshot.docs) {
+      await doc.ref.delete();
+      deletedCount++;
+    }
+    
+    // Delete categories from Firebase
+    await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').delete().catch(() => {});
+    
+    // Clear IndexedDB
+    await db.transactions.clear();
+    await db.monthlyExpenses.clear();
+    await db.renters.clear();
+    
+    // Reset categories to defaults
+    state.categories = {
+      INCOME: ['Haircut', 'Color', 'Other'],
+      DAILY_EXPENSE: ['Products', 'Supplies', 'Other'],
+      MONTHLY_EXPENSE: ['Rent', 'Utilities', 'Insurance', 'Other']
+    };
+    
+    // Save default categories
+    await saveCategories();
+    
+    // Clear localStorage
+    localStorage.removeItem('selectedDate');
+    
+    closeModal();
+    
+    // Show success
     openModal(`
-      <h2 class="modal-title">${title}</h2>
-      <div style="font-size:15px;line-height:1.6;color:var(--text);margin:20px 0;white-space:pre-line;">${message}</div>
-      <div style="display:flex;gap:8px;margin-top:24px;">
-        <button class="btn-secondary" style="flex:1;" onclick="window._confirmResolve(false)">Cancel</button>
-        <button class="btn-submit" style="flex:1;background:var(--danger);" onclick="window._confirmResolve(true)">Delete</button>
+      <h2 class="modal-title" style="color:var(--success);">✅ All Data Deleted</h2>
+      <div style="text-align:center; padding:32px;">
+        <div style="font-size:48px; margin-bottom:16px;">✅</div>
+        <div style="font-size:18px; font-weight:600; margin-bottom:8px;">
+          Database Reset Complete
+        </div>
+        <div style="font-size:14px; color:var(--text-muted); margin-bottom:20px;">
+          Deleted ${deletedCount} items. Your app is now empty and ready for fresh data.
+        </div>
+        <button class="btn-primary" onclick="closeModal(); navigate('daily')">
+          Start Fresh
+        </button>
       </div>
     `);
     
-    window._confirmResolve = (result) => {
-      closeModal();
-      delete window._confirmResolve;
-      resolve(result);
-    };
-  });
-}
-
-// Add swipe-down gesture to close modal
-let modalTouchStart = null;
-document.addEventListener('DOMContentLoaded', () => {
-  const modal = document.getElementById('modal');
-  const modalHandle = document.querySelector('.modal-handle');
-  
-  if (modalHandle) {
-    modalHandle.addEventListener('touchstart', (e) => {
-      modalTouchStart = e.touches[0].clientY;
-    }, { passive: true });
+    showToast('All data deleted successfully');
     
-    modalHandle.addEventListener('touchend', (e) => {
-      if (modalTouchStart === null) return;
-      const touchEnd = e.changedTouches[0].clientY;
-      const diff = touchEnd - modalTouchStart;
-      
-      // If swiped down at least 50px, close modal
-      if (diff > 50) {
-        closeModal();
-      }
-      
-      modalTouchStart = null;
-    }, { passive: true });
-  }
-});
-
-// ----------------------------------------------------------------
-// 20. APP INITIALIZATION
-// ----------------------------------------------------------------
-
-// Called after Firebase confirms the user is signed in.
-async function bootApp() {
-  await loadCategories();
-  await updateRentersTabVisibility();
-
-  const pinSetting  = await db.settings.get('pin');
-  const pinEnabled  = await db.settings.get('pinEnabled');
-  const shouldPin   = pinSetting && pinEnabled?.value === 'true';
-
-  // Hide login screen, show correct gate
-  document.getElementById('login-screen').classList.add('hidden');
-
-  if (shouldPin) {
-    document.getElementById('pin-screen').classList.remove('hidden');
-    initPINPad();
-  } else {
-    document.getElementById('app').classList.remove('hidden');
-    navigate('daily');
+  } catch (err) {
+    console.error('Error deleting all data:', err);
+    closeModal();
+    openModal(`
+      <h2 class="modal-title" style="color:var(--danger);">Error</h2>
+      <div style="padding:20px;">
+        <p style="margin-bottom:16px;">An error occurred while deleting data:</p>
+        <p style="background:var(--bg-secondary); padding:12px; border-radius:4px; font-family:monospace; font-size:13px; margin-bottom:16px;">
+          ${err.message}
+        </p>
+        <button class="btn-primary" onclick="closeModal()">Close</button>
+      </div>
+    `);
   }
 }
 
-// Firebase auth state listener — this is the single entry point for the app.
-auth.onAuthStateChanged(user => {
-  if (user) {
-    currentUser = user;
-    bootApp();
-  } else {
-    currentUser = null;
-    // Hide everything, show login screen
-    document.getElementById('app').classList.add('hidden');
-    document.getElementById('pin-screen').classList.add('hidden');
-    document.getElementById('login-screen').classList.remove('hidden');
-  }
-});
-
-// ----------------------------------------------------------------
-// 21. SERVICE WORKER (auto-update)
-// ----------------------------------------------------------------
-
-let _swRegistration = null;
-let _updateAvailable = false;
-
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    // Register normally (no cache busting - causes false positives)
-    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
-      .then(reg => {
-        _swRegistration = reg;
-
-        // Check for updates immediately on load
-        reg.update().catch(() => {});
-
-        // Listen for updates
-        reg.addEventListener('updatefound', () => {
-          const newWorker = reg.installing;
-          if (newWorker) {
-            newWorker.addEventListener('statechange', () => {
-              // When new service worker is installed and waiting
-              if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                _updateAvailable = true;
-                
-                // Auto-reload to prevent white screen
-                // But give user option to do it manually
-                showUpdateNotification();
-              }
-            });
-          }
-        });
-
-        // Check for waiting service worker (update already downloaded)
-        if (reg.waiting && navigator.serviceWorker.controller) {
-          _updateAvailable = true;
-          showUpdateNotification();
-        }
-      })
-      .catch(err => console.log('SW registration skipped:', err));
-
-    // When new service worker takes control, reload immediately
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      // Clear the dismiss flag so banner doesn't persist
-      sessionStorage.removeItem('updateBannerDismissed');
-      window.location.reload();
-    });
-  });
-
-  // Check for updates when app becomes visible (but not too aggressively)
-  let lastVisibilityCheck = Date.now();
-  document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState === 'visible' && _swRegistration) {
-      // Only check if it's been more than 5 seconds since last check
-      const now = Date.now();
-      if (now - lastVisibilityCheck < 5000) return;
-      lastVisibilityCheck = now;
-      
-      // Check for updates
-      await _swRegistration.update().catch(() => {});
-      
-      // If there's a waiting service worker after the update check,
-      // it means an update happened while we were in the background
-      // We need to reload immediately to prevent white screen
-      setTimeout(() => {
-        if (_swRegistration.waiting && navigator.serviceWorker.controller) {
-          // Show toast and auto-reload to prevent white screen
-          showToast('New version detected - updating app...');
-          
-          // Give the toast a moment to show, then reload
-          setTimeout(() => {
-            _swRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
-            // The controllerchange will trigger reload
-            // But add fallback just in case
-            setTimeout(() => {
-              window.location.reload(true);
-            }, 1000);
-          }, 1500);
-        }
-      }, 500);
-    }
-  });
-
-  // Removed frequent 30-second checks - too aggressive
-}
-
-function showUpdateNotification() {
-  // Don't show if already dismissed in this session
-  if (sessionStorage.getItem('updateBannerDismissed') === 'true') {
-    return;
-  }
-  
-  // Only show if there's actually a waiting service worker
-  if (!_swRegistration || !_swRegistration.waiting) {
-    return;
-  }
-  
-  // Show a non-intrusive update banner at the top
-  const existing = document.getElementById('update-banner');
-  if (existing) return; // Already showing
-
-  const banner = document.createElement('div');
-  banner.id = 'update-banner';
-  banner.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    background: #2D7A4C;
-    color: white;
-    padding: 12px 16px;
-    text-align: center;
-    z-index: 10000;
-    font-size: 14px;
-    font-weight: 500;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-  `;
-  banner.innerHTML = `
-    <span>✨ Update available!</span>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <button onclick="applyUpdate()" style="
-        background: white;
-        color: #2D7A4C;
-        border: none;
-        padding: 6px 16px;
-        border-radius: 6px;
-        font-weight: 600;
-        cursor: pointer;
-        font-size: 13px;
-      ">Update Now</button>
-      <button onclick="dismissUpdateBanner()" style="
-        background: transparent;
-        color: white;
-        border: 1px solid white;
-        padding: 6px 12px;
-        border-radius: 6px;
-        font-weight: 600;
-        cursor: pointer;
-        font-size: 13px;
-      ">Later</button>
-    </div>
-  `;
-  document.body.prepend(banner);
-}
-
-window.dismissUpdateBanner = function() {
-  const banner = document.getElementById('update-banner');
-  if (banner) {
-    banner.remove();
-  }
-  _updateAvailable = false;
-  // Mark as dismissed for this session
-  sessionStorage.setItem('updateBannerDismissed', 'true');
-};
-
-window.applyUpdate = async function() {
-  // Remove banner immediately
-  const banner = document.getElementById('update-banner');
-  if (banner) {
-    banner.remove();
-  }
-  
-  _updateAvailable = false;
-  
-  showToast('Updating app...');
-  
-  if (_swRegistration && _swRegistration.waiting) {
-    // Tell the waiting service worker to skip waiting and become active
-    // This triggers controllerchange which will reload the page
-    _swRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
-  } else {
-    // No waiting worker, do aggressive reload
-    try {
-      if ('serviceWorker' in navigator) {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        for (const registration of registrations) {
-          await registration.unregister();
-        }
-      }
-      await new Promise(resolve => setTimeout(resolve, 300));
-      window.location.reload(true);
-    } catch (e) {
-      window.location.reload(true);
-    }
-  }
-};
-
-async function reloadApp() {
-  showToast('Reloading app...');
-  
-  try {
-    // Unregister current service worker
-    if (_swRegistration) {
-      await _swRegistration.unregister();
-    }
-    
-    // Wait a moment
-    await new Promise(resolve => setTimeout(resolve, 300));
-    
-    // Force a hard reload (bypasses all caches)
-    window.location.reload(true);
-  } catch (e) {
-    // Fallback: just do a hard reload
-    window.location.reload(true);
-  }
-}
-
-async function forceReload() {
-  showToast('Force reloading app...');
-  
-  // Unregister all service workers
-  if ('serviceWorker' in navigator) {
-    const registrations = await navigator.serviceWorker.getRegistrations();
-    for (const registration of registrations) {
-      await registration.unregister();
-    }
-  }
-  
-  // Clear all caches
-  if ('caches' in window) {
-    const cacheNames = await caches.keys();
-    await Promise.all(cacheNames.map(name => caches.delete(name)));
-  }
-  
-  // Hard reload
-  setTimeout(() => {
-    window.location.reload(true);
-  }, 500);
-}
+console.log('Mane Frame Salon Desktop (Full Featured + Reversible Import + Delete All) - Ready');
+console.log('Keyboard Shortcuts:');
+console.log('  Ctrl+I = Add Income');
+console.log('  Ctrl+E = Add Expense');
+console.log('  Ctrl+D = Daily View');
+console.log('  Ctrl+M = Monthly View');
+console.log('  Ctrl+R = Reports View');
