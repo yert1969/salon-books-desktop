@@ -1236,36 +1236,57 @@ async function renderMonthlyReport(el) {
         <button class="btn-secondary" onclick="changeMonth(1); renderReportsView()">Next →</button>
       </div>
       
-      <div class="summary-grid" style="margin-bottom:24px;">
-        <div class="summary-card">
-          <div class="summary-label">Total Income</div>
-          <div class="summary-amount positive">${fmt(totalIncome)}</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Services</div>
-          <div class="summary-amount positive">${fmt(serviceTotal)}</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Tips</div>
-          <div class="summary-amount positive">${fmt(tipTotal)}</div>
-        </div>
-        ${boothRentIncome > 0 ? `
-        <div class="summary-card">
-          <div class="summary-label">Booth Rent</div>
-          <div class="summary-amount positive">${fmt(boothRentIncome)}</div>
-        </div>
-        ` : ''}
-        <div class="summary-card">
-          <div class="summary-label">Daily Expenses</div>
-          <div class="summary-amount negative">${fmt(totalExpense)}</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Monthly Expenses</div>
-          <div class="summary-amount negative">${fmt(monthlyExpenseTotal)}</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Net Profit</div>
-          <div class="summary-amount ${netAfterMonthly >= 0 ? 'positive' : 'negative'}">${fmt(netAfterMonthly)}</div>
+      <!-- Calculation Flow Layout -->
+      <div style="max-width:600px; margin:0 auto 24px auto;">
+        <div style="background:var(--bg-secondary); border-radius:8px; padding:24px;">
+          <h3 style="margin:0 0 20px 0; font-size:18px; color:var(--text); text-align:center;">Monthly Calculation</h3>
+          
+          <!-- Income Section -->
+          <div style="margin-bottom:20px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(45, 122, 76, 0.1); border-radius:6px; margin-bottom:8px;">
+              <span style="font-weight:600; color:var(--text);">Services</span>
+              <span style="font-size:18px; font-weight:700; color:var(--success);">${fmt(serviceTotal)}</span>
+            </div>
+            
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(45, 122, 76, 0.1); border-radius:6px; margin-bottom:8px;">
+              <span style="font-weight:600; color:var(--text);"><span style="color:var(--success); font-size:20px; margin-right:8px;">+</span>Tips</span>
+              <span style="font-size:18px; font-weight:700; color:var(--success);">${fmt(tipTotal)}</span>
+            </div>
+            
+            ${boothRentIncome > 0 ? `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(45, 122, 76, 0.1); border-radius:6px; margin-bottom:8px;">
+              <span style="font-weight:600; color:var(--text);"><span style="color:var(--success); font-size:20px; margin-right:8px;">+</span>Booth Rent</span>
+              <span style="font-size:18px; font-weight:700; color:var(--success);">${fmt(boothRentIncome)}</span>
+            </div>
+            ` : ''}
+            
+            <div style="border-top:3px solid var(--success); margin:12px 0; padding-top:12px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(45, 122, 76, 0.15); border-radius:6px; border:2px solid var(--success);">
+                <span style="font-weight:700; color:var(--text); font-size:16px;"><span style="color:var(--success); font-size:20px; margin-right:8px;">=</span>Total Income</span>
+                <span style="font-size:22px; font-weight:800; color:var(--success);">${fmt(totalIncome)}</span>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Expense Section -->
+          <div style="margin-bottom:20px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(193, 56, 56, 0.1); border-radius:6px; margin-bottom:8px;">
+              <span style="font-weight:600; color:var(--text);"><span style="color:var(--danger); font-size:20px; margin-right:8px;">−</span>Daily Expenses</span>
+              <span style="font-size:18px; font-weight:700; color:var(--danger);">${fmt(totalExpense)}</span>
+            </div>
+            
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(193, 56, 56, 0.1); border-radius:6px; margin-bottom:8px;">
+              <span style="font-weight:600; color:var(--text);"><span style="color:var(--danger); font-size:20px; margin-right:8px;">−</span>Monthly Expenses</span>
+              <span style="font-size:18px; font-weight:700; color:var(--danger);">${fmt(monthlyExpenseTotal)}</span>
+            </div>
+            
+            <div style="border-top:3px solid var(--success); margin:12px 0; padding-top:12px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; padding:16px; background:rgba(45, 122, 76, 0.2); border-radius:6px; border:3px solid var(--success);">
+                <span style="font-weight:700; color:var(--text); font-size:18px;"><span style="color:var(--success); font-size:24px; margin-right:8px;">=</span>Net Profit</span>
+                <span style="font-size:28px; font-weight:800; color:var(--success);">${fmt(netAfterMonthly)}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       
