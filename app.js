@@ -30,7 +30,7 @@ db.version(2).stores({
   transactions: 'id, userId, date, type, category',
   monthlyExpenses: 'id, userId, year, month, category',
   renters: 'id, userId, name',
-  rentPayments: 'id, userId, datePaid',
+  rentPayments: 'id, userId, datePaid, weekStart, renterId',
   dailySummary: 'id, userId, date',
   categories: 'id, userId, type'
 });
@@ -43,6 +43,7 @@ let state = {
   selectedMonth: new Date().getMonth() + 1,
   selectedYear: new Date().getFullYear(),
   reportType: 'weekly',
+  rentersWeekStart: null, // Current week for renters view
   categories: {
     INCOME: ['Haircut', 'Color', 'Highlights', 'Perm', 'Extensions', 'Treatment', 'Blowout', 'Styling', 'Other'],
     DAILY_EXPENSE: ['Products', 'Supplies', 'Lunch', 'Gas', 'Parking', 'Other'],
@@ -85,13 +86,48 @@ function addDays(dateStr, days) {
 function getWeekStart(dateStr) {
   const d = new Date(dateStr + 'T00:00:00');
   const day = d.getDay();
-  const diff = d.getDate() - day;
-  d.setDate(diff);
+  // Start week on Monday (day 1)
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const dayStr = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${dayStr}`;
 }
+
+// Renters helper functions
+function getWeekDue(weekStart) {
+  return addDays(weekStart, 5); // Saturday
+}
+
+function nextWeekStart(ws) {
+  return addDays(ws, 7);
+}
+
+function prevWeekStart(ws) {
+  return addDays(ws, -7);
+}
+
+function formatWeekRange(ws) {
+  const end = addDays(ws, 6);
+  const s = new Date(ws + 'T00:00:00');
+  const e = new Date(end + 'T00:00:00');
+  const opts = { month: 'short', day: 'numeric' };
+  return s.toLocaleDateString('en-US', opts) + ' – ' + e.toLocaleDateString('en-US', opts);
+}
+
+function formatDateDisplay(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function getRentStatus(weekStart, datePaid) {
+  if (!datePaid) return 'unpaid';
+  const due = new Date(getWeekDue(weekStart) + 'T23:59:59');
+  const paid = new Date(datePaid + 'T00:00:00');
+  return paid <= due ? 'ontime' : 'late';
+}
+
 
 function fmt(num) {
   return '$' + Number(num).toFixed(2);
@@ -2193,46 +2229,162 @@ async function exportToCSV() {
 
 async function renderRentersView() {
   const content = document.getElementById('content');
-  const renters = await db.renters.toArray();
+  
+  // Initialize week to current week if not set
+  if (!state.rentersWeekStart) {
+    state.rentersWeekStart = getWeekStart(todayStr());
+  }
+  
+  const ws = state.rentersWeekStart;
+  const weekDue = getWeekDue(ws);
+  
+  // Get active renters
+  const allRenters = await db.renters.toArray();
+  const renters = allRenters.filter(r => r.status === 'active' || !r.status);
+  
+  // Get payments for this week
+  const allPayments = await db.rentPayments.toArray();
+  const payments = allPayments.filter(p => p.weekStart === ws);
+  
+  // Create payment map
+  const payMap = {};
+  payments.forEach(p => { payMap[p.renterId] = p; });
+  
+  // Calculate totals
+  const expectedTotal = renters.reduce((s, r) => s + (r.weeklyRent || 0), 0);
+  const collectedTotal = payments.reduce((s, p) => s + (p.amount || 0), 0);
+  const outstanding = expectedTotal - collectedTotal;
+  
+  const isCurrentWeek = ws === getWeekStart(todayStr());
   
   content.innerHTML = `
     <div class="page-header">
       <h2 class="page-title">Booth Renters</h2>
-      <p class="page-subtitle">Manage your booth renters</p>
-      <button class="btn-primary" style="margin-top:12px;" onclick="openAddRenterModal()">+ Add Renter</button>
+      <p class="page-subtitle">Manage your booth renters and weekly payments</p>
     </div>
     
+    <!-- Weekly Navigation -->
+    <div style="display:flex; align-items:center; justify-content:center; gap:16px; margin:24px 0;">
+      <button class="btn-secondary" onclick="rentersChangeWeek(-1)" style="padding:8px 16px;">
+        ← Prev Week
+      </button>
+      <div style="font-size:18px; font-weight:600; color:var(--text); min-width:280px; text-align:center;">
+        Week of ${formatWeekRange(ws)}
+      </div>
+      <button class="btn-secondary" onclick="rentersChangeWeek(1)" 
+        ${isCurrentWeek ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''}
+        style="padding:8px 16px;">
+        Next Week →
+      </button>
+    </div>
+    
+    <!-- Summary Card -->
+    <div class="card" style="margin-bottom:24px;">
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:24px; padding:8px;">
+        <div style="text-align:center;">
+          <div style="font-size:13px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">EXPECTED</div>
+          <div style="font-size:32px; font-weight:700; color:var(--text);">${fmt(expectedTotal)}</div>
+        </div>
+        <div style="text-align:center; border-left:1px solid var(--border); border-right:1px solid var(--border);">
+          <div style="font-size:13px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">COLLECTED</div>
+          <div style="font-size:32px; font-weight:700; color:var(--success);">${fmt(collectedTotal)}</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:13px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">OUTSTANDING</div>
+          <div style="font-size:32px; font-weight:700; color:${outstanding > 0 ? 'var(--danger)' : 'var(--success)'};">
+            ${outstanding > 0 ? fmt(outstanding) : '✓ Paid'}
+          </div>
+        </div>
+      </div>
+      <div style="text-align:center; padding:12px 0 4px 0; color:var(--text-muted); font-size:14px; border-top:1px solid var(--border); margin-top:12px;">
+        Rent due Saturday ${formatDateDisplay(weekDue)}
+      </div>
+    </div>
+    
+    <!-- Renters List -->
     <div class="card">
-      ${renters.length === 0 ? '<p style="text-align:center; color:var(--text-muted); padding:40px;">No renters yet</p>' : `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 style="font-size:18px; margin:0;">Renters</h3>
+        <button class="btn-primary" onclick="openAddRenterModal()">+ Add Renter</button>
+      </div>
+      
+      ${renters.length === 0 ? `
+        <div style="text-align:center; padding:60px 20px; color:var(--text-muted);">
+          <div style="font-size:48px; margin-bottom:12px;">👥</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">No booth renters yet</div>
+          <div style="font-size:14px;">Click "+ Add Renter" to get started</div>
+        </div>
+      ` : `
         <table class="data-table">
           <thead>
             <tr>
-              <th>Name</th>
+              <th style="width:50px;"></th>
+              <th>Renter</th>
               <th>Weekly Rent</th>
-              <th>Start Date</th>
-              <th>Phone</th>
-              <th>Notes</th>
-              <th></th>
-              <th></th>
+              <th>Payment Status</th>
+              <th style="width:140px;"></th>
             </tr>
           </thead>
           <tbody>
-            ${renters.map(r => `
-              <tr>
-                <td style="font-weight:600;">${r.name}</td>
-                <td>${fmt(r.weeklyRent || 0)}</td>
-                <td>${r.startDate || '—'}</td>
-                <td>${r.phone || '—'}</td>
-                <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis;">${r.notes || '—'}</td>
-                <td><button class="btn-secondary" style="padding:6px 12px; font-size:12px;" onclick="openEditRenterModal('${r.id}')">Edit</button></td>
-                <td><button class="btn-danger" style="padding:6px 12px; font-size:12px;" onclick="deleteRenter('${r.id}')">Delete</button></td>
-              </tr>
-            `).join('')}
+            ${renters.map(r => {
+              const p = payMap[r.id];
+              const status = p ? getRentStatus(ws, p.datePaid) : 'unpaid';
+              const statusLabel = { ontime: 'Paid On Time', late: 'Paid Late', unpaid: 'Not Paid' }[status];
+              const statusColor = { ontime: 'var(--success)', late: '#F59E0B', unpaid: 'var(--text-muted)' }[status];
+              const icon = { ontime: '✅', late: '⚠️', unpaid: '○' }[status];
+              
+              return `
+                <tr>
+                  <td style="text-align:center; font-size:20px;">${icon}</td>
+                  <td>
+                    <div style="font-weight:600;">${r.name}</div>
+                    ${p ? `<div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+                      Paid ${formatDateDisplay(p.datePaid)} · ${p.paymentMethod}
+                    </div>` : ''}
+                  </td>
+                  <td style="font-weight:600; color:var(--text);">${fmt(r.weeklyRent || 0)}</td>
+                  <td>
+                    <span style="color:${statusColor}; font-weight:600; font-size:13px;">
+                      ${statusLabel}
+                    </span>
+                  </td>
+                  <td style="text-align:right;">
+                    ${!p ? `
+                      <button class="btn-primary" style="padding:6px 12px; font-size:12px;" 
+                        onclick="openLogPaymentModal('${r.id}')">
+                        Log Payment
+                      </button>
+                    ` : `
+                      <button class="btn-secondary" style="padding:6px 12px; font-size:12px;" 
+                        onclick="openEditPaymentModal('${p.id}')">
+                        Edit
+                      </button>
+                    `}
+                  </td>
+                </tr>
+              `;
+            }).join('')}
           </tbody>
         </table>
       `}
     </div>
+    
+    <!-- Manage Renters Section -->
+    <div class="card" style="margin-top:24px;">
+      <h3 style="font-size:18px; margin-bottom:16px;">Manage Renters</h3>
+      <p style="color:var(--text-muted); margin-bottom:16px; font-size:14px;">
+        Add, edit, or remove booth renters. Active renters will appear in the weekly payment tracking above.
+      </p>
+      <button class="btn-secondary" onclick="openManageRentersModal()">View All Renters</button>
+    </div>
   `;
+}
+
+function rentersChangeWeek(dir) {
+  state.rentersWeekStart = dir === 1
+    ? nextWeekStart(state.rentersWeekStart)
+    : prevWeekStart(state.rentersWeekStart);
+  renderRentersView();
 }
 
 function openAddRenterModal() {
@@ -2275,6 +2427,7 @@ async function saveNewRenter() {
     startDate: document.getElementById('renter-start').value,
     phone: document.getElementById('renter-phone').value,
     notes: document.getElementById('renter-notes').value,
+    status: 'active', // New renters are active by default
     createdAt: firebase.firestore.Timestamp.now()
   };
   
@@ -2313,6 +2466,13 @@ async function openEditRenterModal(id) {
         <label class="form-label">Notes</label>
         <input type="text" id="edit-renter-notes" class="form-input" value="${r.notes || ''}">
       </div>
+      <div class="form-group">
+        <label class="form-label">Status</label>
+        <select id="edit-renter-status" class="form-select">
+          <option value="active" ${r.status === 'active' || !r.status ? 'selected' : ''}>Active</option>
+          <option value="inactive" ${r.status === 'inactive' ? 'selected' : ''}>Inactive</option>
+        </select>
+      </div>
       <div style="display:flex;gap:8px;margin-top:24px;">
         <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">Cancel</button>
         <button type="submit" class="btn-primary" style="flex:1;">Save</button>
@@ -2327,7 +2487,8 @@ async function saveEditRenter(id) {
     weeklyRent: parseFloat(document.getElementById('edit-renter-rent').value) || 0,
     startDate: document.getElementById('edit-renter-start').value,
     phone: document.getElementById('edit-renter-phone').value,
-    notes: document.getElementById('edit-renter-notes').value
+    notes: document.getElementById('edit-renter-notes').value,
+    status: document.getElementById('edit-renter-status').value
   };
   
   await firestore.collection('users').doc(currentUser.uid).collection('renters').doc(id).update(updates);
@@ -2352,6 +2513,278 @@ async function deleteRenter(id) {
   
   showToast('Renter deleted');
   renderRentersView();
+}
+
+// ============================================================
+// RENT PAYMENT FUNCTIONS
+// ============================================================
+
+async function openLogPaymentModal(renterId) {
+  const renter = await db.renters.get(renterId);
+  if (!renter) return;
+  
+  openModal(`
+    <h2 class="modal-title">Log Rent Payment</h2>
+    <p style="color:var(--text-muted); font-size:14px; margin-bottom:20px;">
+      ${renter.name} · Week of ${formatWeekRange(state.rentersWeekStart)}
+    </p>
+    
+    <form onsubmit="saveRentPayment('${renterId}'); return false;">
+      <div class="form-group">
+        <label class="form-label">Amount Paid ($)</label>
+        <input type="number" id="rp-amount" class="form-input" step="0.01" min="0" 
+          value="${renter.weeklyRent || 140}" required>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Date Paid</label>
+        <input type="date" id="rp-date" class="form-input" value="${todayStr()}" required>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Payment Method</label>
+        <select id="rp-method" class="form-select" required>
+          <option>Cash</option>
+          <option>Venmo</option>
+          <option>Zelle</option>
+          <option>Card</option>
+          <option>Check</option>
+          <option>Other</option>
+        </select>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Notes (optional)</label>
+        <input type="text" id="rp-notes" class="form-input" placeholder="Any notes...">
+      </div>
+      
+      <div style="display:flex; gap:8px; margin-top:24px;">
+        <button type="button" class="btn-secondary" style="flex:1;" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" style="flex:1;">Save Payment</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveRentPayment(renterId) {
+  const amount = parseFloat(document.getElementById('rp-amount').value);
+  const datePaid = document.getElementById('rp-date').value;
+  const method = document.getElementById('rp-method').value;
+  const notes = document.getElementById('rp-notes').value.trim();
+  
+  if (!amount || !datePaid) {
+    showToast('Please fill in amount and date');
+    return;
+  }
+  
+  const ws = state.rentersWeekStart;
+  
+  // Check if payment already exists for this renter + week
+  const allPayments = await db.rentPayments.toArray();
+  const existing = allPayments.find(p => p.renterId === renterId && p.weekStart === ws);
+  
+  if (existing) {
+    showToast('Payment already logged for this week');
+    return;
+  }
+  
+  const payment = {
+    userId: currentUser.uid,
+    renterId: renterId,
+    weekStart: ws,
+    amount: amount,
+    datePaid: datePaid,
+    paymentMethod: method,
+    notes: notes,
+    createdAt: firebase.firestore.Timestamp.now()
+  };
+  
+  // Save to Firestore
+  const docRef = await firestore.collection('users')
+    .doc(currentUser.uid)
+    .collection('rentPayments')
+    .add(payment);
+  
+  // Save to local DB
+  payment.id = docRef.id;
+  await db.rentPayments.add(payment);
+  
+  showToast('Payment logged successfully');
+  closeModal();
+  renderRentersView();
+}
+
+async function openEditPaymentModal(paymentId) {
+  const payment = await db.rentPayments.get(paymentId);
+  if (!payment) return;
+  
+  const renter = await db.renters.get(payment.renterId);
+  
+  openModal(`
+    <h2 class="modal-title">Edit Rent Payment</h2>
+    <p style="color:var(--text-muted); font-size:14px; margin-bottom:20px;">
+      ${renter ? renter.name : 'Renter'} · Week of ${formatWeekRange(payment.weekStart)}
+    </p>
+    
+    <form onsubmit="saveEditPayment('${paymentId}'); return false;">
+      <div class="form-group">
+        <label class="form-label">Amount Paid ($)</label>
+        <input type="number" id="ep-amount" class="form-input" step="0.01" min="0" 
+          value="${payment.amount}" required>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Date Paid</label>
+        <input type="date" id="ep-date" class="form-input" value="${payment.datePaid}" required>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Payment Method</label>
+        <select id="ep-method" class="form-select" required>
+          ${['Cash', 'Venmo', 'Zelle', 'Card', 'Check', 'Other'].map(m => 
+            `<option ${m === payment.paymentMethod ? 'selected' : ''}>${m}</option>`
+          ).join('')}
+        </select>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Notes (optional)</label>
+        <input type="text" id="ep-notes" class="form-input" value="${payment.notes || ''}" 
+          placeholder="Any notes...">
+      </div>
+      
+      <div style="display:flex; gap:8px; margin-top:24px;">
+        <button type="button" class="btn-danger" style="flex:1;" onclick="deletePayment('${paymentId}')">
+          Delete Payment
+        </button>
+        <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" style="flex:1;">Save Changes</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveEditPayment(paymentId) {
+  const amount = parseFloat(document.getElementById('ep-amount').value);
+  const datePaid = document.getElementById('ep-date').value;
+  const method = document.getElementById('ep-method').value;
+  const notes = document.getElementById('ep-notes').value.trim();
+  
+  if (!amount || !datePaid) {
+    showToast('Please fill in amount and date');
+    return;
+  }
+  
+  const updates = {
+    amount: amount,
+    datePaid: datePaid,
+    paymentMethod: method,
+    notes: notes
+  };
+  
+  // Update Firestore
+  await firestore.collection('users')
+    .doc(currentUser.uid)
+    .collection('rentPayments')
+    .doc(paymentId)
+    .update(updates);
+  
+  // Update local DB
+  await db.rentPayments.update(paymentId, updates);
+  
+  showToast('Payment updated');
+  closeModal();
+  renderRentersView();
+}
+
+async function deletePayment(paymentId) {
+  const confirmed = await confirmDialog(
+    'Are you sure you want to delete this payment? This cannot be undone.',
+    'Confirm Delete'
+  );
+  
+  if (!confirmed) return;
+  
+  // Delete from Firestore
+  await firestore.collection('users')
+    .doc(currentUser.uid)
+    .collection('rentPayments')
+    .doc(paymentId)
+    .delete();
+  
+  // Delete from local DB
+  await db.rentPayments.delete(paymentId);
+  
+  showToast('Payment deleted');
+  closeModal();
+  renderRentersView();
+}
+
+// ============================================================
+// MANAGE RENTERS MODAL
+// ============================================================
+
+async function openManageRentersModal() {
+  const renters = await db.renters.toArray();
+  
+  openModal(`
+    <h2 class="modal-title">Manage Renters</h2>
+    <p style="color:var(--text-muted); font-size:14px; margin-bottom:20px;">
+      Add, edit, or remove booth renters
+    </p>
+    
+    <div style="margin-bottom:16px;">
+      <button class="btn-primary" onclick="closeModal(); setTimeout(() => openAddRenterModal(), 100);" style="width:100%;">
+        + Add New Renter
+      </button>
+    </div>
+    
+    ${renters.length === 0 ? `
+      <div style="text-align:center; padding:40px 20px; color:var(--text-muted);">
+        No renters yet. Click "Add New Renter" to get started.
+      </div>
+    ` : `
+      <div style="max-height:400px; overflow-y:auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Weekly Rent</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renters.map(r => `
+              <tr>
+                <td style="font-weight:600;">${r.name}</td>
+                <td>${fmt(r.weeklyRent || 0)}</td>
+                <td>
+                  <span style="color:${r.status === 'active' || !r.status ? 'var(--success)' : 'var(--text-muted)'};">
+                    ${r.status === 'active' || !r.status ? 'Active' : 'Inactive'}
+                  </span>
+                </td>
+                <td style="text-align:right;">
+                  <button class="btn-secondary" style="padding:4px 8px; font-size:12px; margin-right:4px;" 
+                    onclick="closeModal(); setTimeout(() => openEditRenterModal('${r.id}'), 100);">
+                    Edit
+                  </button>
+                  <button class="btn-danger" style="padding:4px 8px; font-size:12px;" 
+                    onclick="closeModal(); setTimeout(() => deleteRenter('${r.id}'), 100);">
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `}
+    
+    <div style="margin-top:20px;">
+      <button class="btn-secondary" onclick="closeModal()" style="width:100%;">Close</button>
+    </div>
+  `, 'large');
 }
 
 
