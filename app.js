@@ -1169,9 +1169,11 @@ async function renderMonthlyReport(el) {
   const income = monthTxns.filter(t => t.type === 'INCOME');
   const expenses = monthTxns.filter(t => t.type === 'EXPENSE');
   
-  const totalIncome = income.reduce((s, t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+  // Separate services and tips
+  const serviceTotal = income.reduce((s, t) => s + (t.serviceAmount||0), 0);
+  const tipTotal = income.reduce((s, t) => s + (t.tipAmount||0), 0);
   const totalExpense = expenses.reduce((s, t) => s + (t.amount||0), 0);
-  const totalNet = totalIncome - totalExpense;
+  const totalNet = serviceTotal + tipTotal - totalExpense;
   
   // Booth rent payments (income from renters)
   const allRentPayments = await db.rentPayments.toArray();
@@ -1190,7 +1192,9 @@ async function renderMonthlyReport(el) {
   );
   const monthlyExpenseTotal = monthlyExpenses.reduce((s, e) => s + (e.amount||0), 0);
   
-  const netAfterMonthly = totalNet + boothRentIncome - monthlyExpenseTotal;
+  // Total income includes booth rent
+  const totalIncome = serviceTotal + tipTotal + boothRentIncome;
+  const netAfterMonthly = totalIncome - totalExpense - monthlyExpenseTotal;
   
   // Category breakdown
   const incomeByCategory = {};
@@ -1237,9 +1241,17 @@ async function renderMonthlyReport(el) {
           <div class="summary-label">Total Income</div>
           <div class="summary-amount positive">${fmt(totalIncome)}</div>
         </div>
+        <div class="summary-card">
+          <div class="summary-label">Services</div>
+          <div class="summary-amount positive">${fmt(serviceTotal)}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Tips</div>
+          <div class="summary-amount positive">${fmt(tipTotal)}</div>
+        </div>
         ${boothRentIncome > 0 ? `
         <div class="summary-card">
-          <div class="summary-label">Booth Rent Income</div>
+          <div class="summary-label">Booth Rent</div>
           <div class="summary-amount positive">${fmt(boothRentIncome)}</div>
         </div>
         ` : ''}
