@@ -25,6 +25,16 @@ db.version(1).stores({
   categories: 'id, userId, type'
 });
 
+// Version 2: Add rentPayments and dailySummary for booth rent tracking
+db.version(2).stores({
+  transactions: 'id, userId, date, type, category',
+  monthlyExpenses: 'id, userId, year, month, category',
+  renters: 'id, userId, name',
+  rentPayments: 'id, userId, datePaid',
+  dailySummary: 'id, userId, date',
+  categories: 'id, userId, type'
+});
+
 // Global State
 let currentUser = null;
 let state = {
@@ -765,7 +775,7 @@ async function renderMonthlyView() {
         <div class="form-group">
           <label class="form-label">Category</label>
           <select id="monthly-category" class="form-select">
-            ${(state.categories.MONTHLY_EXPENSE || []).map(c => `<option value="${c}">${c}</option>`).join('')}
+            ${[...(state.categories.DAILY_EXPENSE || []), ...(state.categories.MONTHLY_EXPENSE || [])].map(c => `<option value="${c}">${c}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -863,7 +873,8 @@ async function openEditMonthlyExpenseModal(id) {
   const e = await db.monthlyExpenses.get(id);
   if (!e) return;
   
-  const catOptions = (state.categories.MONTHLY_EXPENSE || [])
+  const allExpenseCategories = [...(state.categories.DAILY_EXPENSE || []), ...(state.categories.MONTHLY_EXPENSE || [])];
+  const catOptions = allExpenseCategories
     .map(name => `<option value="${name}" ${name === e.category ? 'selected' : ''}>${name}</option>`)
     .join('');
   
@@ -1112,6 +1123,15 @@ async function renderMonthlyReport(el) {
   const totalExpense = expenses.reduce((s, t) => s + (t.amount||0), 0);
   const totalNet = totalIncome - totalExpense;
   
+  // Booth rent payments (income from renters)
+  const allRentPayments = await db.rentPayments.toArray();
+  const monthRentPayments = allRentPayments.filter(p => {
+    if (!p.datePaid) return false;
+    const [y, m] = p.datePaid.split('-');
+    return parseInt(y) === state.selectedYear && parseInt(m) === state.selectedMonth;
+  });
+  const boothRentIncome = monthRentPayments.reduce((s, p) => s + (p.amount||0), 0);
+  
   // Monthly expenses - Get all and filter (Dexie doesn't support chaining where clauses)
   const allMonthlyExpenses = await db.monthlyExpenses.toArray();
   const monthlyExpenses = allMonthlyExpenses.filter(e => 
@@ -1120,7 +1140,7 @@ async function renderMonthlyReport(el) {
   );
   const monthlyExpenseTotal = monthlyExpenses.reduce((s, e) => s + (e.amount||0), 0);
   
-  const netAfterMonthly = totalNet - monthlyExpenseTotal;
+  const netAfterMonthly = totalNet + boothRentIncome - monthlyExpenseTotal;
   
   // Category breakdown
   const incomeByCategory = {};
@@ -1128,6 +1148,10 @@ async function renderMonthlyReport(el) {
     const cat = t.category || 'Other';
     incomeByCategory[cat] = (incomeByCategory[cat] || 0) + (t.serviceAmount||0) + (t.tipAmount||0);
   });
+  // Add booth rent income to the breakdown
+  if (boothRentIncome > 0) {
+    incomeByCategory['Booth Rent'] = (incomeByCategory['Booth Rent'] || 0) + boothRentIncome;
+  }
   
   const expenseByCategory = {};
   // Add daily expenses
@@ -1163,6 +1187,12 @@ async function renderMonthlyReport(el) {
           <div class="summary-label">Total Income</div>
           <div class="summary-amount positive">${fmt(totalIncome)}</div>
         </div>
+        ${boothRentIncome > 0 ? `
+        <div class="summary-card">
+          <div class="summary-label">Booth Rent Income</div>
+          <div class="summary-amount positive">${fmt(boothRentIncome)}</div>
+        </div>
+        ` : ''}
         <div class="summary-card">
           <div class="summary-label">Daily Expenses</div>
           <div class="summary-amount negative">${fmt(totalExpense)}</div>
