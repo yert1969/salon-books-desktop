@@ -1130,9 +1130,15 @@ async function renderMonthlyReport(el) {
   });
   
   const expenseByCategory = {};
+  // Add daily expenses
   expenses.forEach(t => {
     const cat = t.category || 'Other';
     expenseByCategory[cat] = (expenseByCategory[cat] || 0) + (t.amount||0);
+  });
+  // Add monthly expenses to the breakdown
+  monthlyExpenses.forEach(e => {
+    const cat = e.category || 'Other';
+    expenseByCategory[cat] = (expenseByCategory[cat] || 0) + (e.amount||0);
   });
   
   el.innerHTML = `
