@@ -290,13 +290,25 @@ async function loadCategories() {
     const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
     if (doc.exists) {
       const firestoreCategories = doc.data();
+      console.log('Loaded categories from Firebase:', firestoreCategories);
+      
       state.categories = {
-        INCOME: firestoreCategories.INCOME || state.categories.INCOME,
-        DAILY_EXPENSE: firestoreCategories.DAILY_EXPENSE || state.categories.DAILY_EXPENSE,
-        MONTHLY_EXPENSE: firestoreCategories.MONTHLY_EXPENSE || state.categories.MONTHLY_EXPENSE
+        INCOME: firestoreCategories.INCOME && firestoreCategories.INCOME.length > 0 
+          ? firestoreCategories.INCOME 
+          : state.categories.INCOME,
+        DAILY_EXPENSE: firestoreCategories.DAILY_EXPENSE && firestoreCategories.DAILY_EXPENSE.length > 0 
+          ? firestoreCategories.DAILY_EXPENSE 
+          : state.categories.DAILY_EXPENSE,
+        MONTHLY_EXPENSE: firestoreCategories.MONTHLY_EXPENSE && firestoreCategories.MONTHLY_EXPENSE.length > 0 
+          ? firestoreCategories.MONTHLY_EXPENSE 
+          : state.categories.MONTHLY_EXPENSE
       };
+      console.log('Categories updated:', state.categories);
+    } else {
+      console.log('No categories found in Firebase, using defaults');
+      // Save defaults to Firebase for first-time users
+      await saveCategories();
     }
-    console.log('Categories loaded');
   } catch (err) {
     console.error('Category load error:', err);
   }
