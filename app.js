@@ -264,6 +264,20 @@ async function syncFromFirestore() {
       await db.renters.put({ id: doc.id, userId: uid, ...doc.data() });
     }
     console.log(`Synced ${renterSnapshot.docs.length} renters`);
+    
+    // Sync rent payments
+    const rentPaymentsSnapshot = await firestore.collection('users').doc(uid).collection('rentPayments').get();
+    for (const doc of rentPaymentsSnapshot.docs) {
+      await db.rentPayments.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${rentPaymentsSnapshot.docs.length} rent payments`);
+    
+    // Sync daily summaries
+    const dailySummarySnapshot = await firestore.collection('users').doc(uid).collection('dailySummary').get();
+    for (const doc of dailySummarySnapshot.docs) {
+      await db.dailySummary.put({ id: doc.id, userId: uid, ...doc.data() });
+    }
+    console.log(`Synced ${dailySummarySnapshot.docs.length} daily summaries`);
   } catch (err) {
     console.error('Sync error:', err);
   }
@@ -3811,6 +3825,20 @@ async function executeDeleteAllData() {
       deletedCount++;
     }
     
+    // Delete all rent payments from Firebase
+    const rentPaymentsSnapshot = await firestore.collection('users').doc(currentUser.uid).collection('rentPayments').get();
+    for (const doc of rentPaymentsSnapshot.docs) {
+      await doc.ref.delete();
+      deletedCount++;
+    }
+    
+    // Delete all daily summaries from Firebase
+    const dailySummarySnapshot = await firestore.collection('users').doc(currentUser.uid).collection('dailySummary').get();
+    for (const doc of dailySummarySnapshot.docs) {
+      await doc.ref.delete();
+      deletedCount++;
+    }
+    
     // Delete categories from Firebase
     await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').delete().catch(() => {});
     
@@ -3818,6 +3846,8 @@ async function executeDeleteAllData() {
     await db.transactions.clear();
     await db.monthlyExpenses.clear();
     await db.renters.clear();
+    await db.rentPayments.clear();
+    await db.dailySummary.clear();
     
     // Reset categories to defaults
     state.categories = {
