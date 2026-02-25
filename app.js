@@ -295,70 +295,106 @@ async function loadCategories() {
     
     if (doc.exists) {
       const firestoreCategories = doc.data();
-      console.log('Firebase has:', Object.keys(firestoreCategories));
+      console.log('Firebase raw data:', firestoreCategories);
+      console.log('Firebase keys:', Object.keys(firestoreCategories));
       
-      // Check if old format exists
-      const hasOldFormat = firestoreCategories.DAILY_EXPENSE || firestoreCategories.MONTHLY_EXPENSE;
-      
-      if (hasOldFormat) {
-        console.log('⚠️ OLD FORMAT DETECTED - Running migration...');
+      // Check for completely broken format with 'value' and 'key'
+      if (firestoreCategories.value || firestoreCategories.key) {
+        console.error('❌❌❌ FIREBASE HAS BROKEN FORMAT - value/key fields detected ❌❌❌');
+        console.log('value field:', firestoreCategories.value);
+        console.log('key field:', firestoreCategories.key);
         
-        // Merge old format
-        const dailyExpenses = firestoreCategories.DAILY_EXPENSE || [];
-        const monthlyExpenses = firestoreCategories.MONTHLY_EXPENSE || [];
-        const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
-        
-        console.log(`Merging: ${dailyExpenses.length} daily + ${monthlyExpenses.length} monthly = ${mergedExpenses.length} total`);
-        console.log('Merged categories:', mergedExpenses);
-        
-        // Create new format - ONLY these two fields
-        const newFormat = {
-          INCOME: firestoreCategories.INCOME || [],
-          EXPENSE: mergedExpenses
-        };
-        
-        // Update local state
-        state.categories = newFormat;
-        
-        console.log('💾 STEP 1: Deleting old document completely...');
-        await docRef.delete();
-        
-        console.log('💾 STEP 2: Creating new document with unified format...');
-        await docRef.set(newFormat);
-        
-        console.log('💾 STEP 3: Verifying migration...');
-        const verifyDoc = await docRef.get();
-        if (verifyDoc.exists) {
-          const verifyData = verifyDoc.data();
-          console.log('✓ Firebase now has fields:', Object.keys(verifyData));
-          console.log('✓ INCOME count:', verifyData.INCOME?.length);
-          console.log('✓ EXPENSE count:', verifyData.EXPENSE?.length);
-          
-          if (verifyData.DAILY_EXPENSE || verifyData.MONTHLY_EXPENSE) {
-            console.error('❌❌❌ MIGRATION FAILED - OLD FIELDS STILL EXIST ❌❌❌');
-          } else {
-            console.log('✅✅✅ MIGRATION SUCCESSFUL ✅✅✅');
-          }
+        // Try to extract actual data from whatever this is
+        let actualData = firestoreCategories;
+        if (firestoreCategories.value && typeof firestoreCategories.value === 'object') {
+          console.log('Attempting to use .value field as actual data...');
+          actualData = firestoreCategories.value;
+          console.log('Extracted data:', actualData);
         }
-      } else if (firestoreCategories.EXPENSE) {
-        // Already in new format
-        console.log('✓ Using new format');
-        state.categories = {
-          INCOME: firestoreCategories.INCOME || [],
-          EXPENSE: firestoreCategories.EXPENSE || []
-        };
-      } else {
-        // No categories at all
-        console.log('⚠️ No categories found, using defaults');
+        
+        // Now check this extracted data
+        const hasOldFormat = actualData.DAILY_EXPENSE || actualData.MONTHLY_EXPENSE;
+        
+        if (hasOldFormat || actualData.EXPENSE) {
+          console.log('Found valid category data inside .value field!');
+          console.log('Processing as normal...');
+          
+          if (hasOldFormat) {
+            // Merge and migrate
+            const dailyExpenses = actualData.DAILY_EXPENSE || [];
+            const monthlyExpenses = actualData.MONTHLY_EXPENSE || [];
+            const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
+            
+            state.categories = {
+              INCOME: actualData.INCOME || [],
+              EXPENSE: mergedExpenses
+            };
+          } else {
+            state.categories = {
+              INCOME: actualData.INCOME || [],
+              EXPENSE: actualData.EXPENSE || []
+            };
+          }
+          
+          // Save clean format
+          console.log('💾 Saving clean format without value/key wrapper...');
+          await docRef.delete();
+          await docRef.set(state.categories);
+          
+          console.log('✓ Fixed broken format');
+        } else {
+          console.error('Cannot extract valid category data - using defaults');
+        }
+      }
+      // Normal processing
+      else {
+        // Check if old format exists
+        const hasOldFormat = firestoreCategories.DAILY_EXPENSE || firestoreCategories.MONTHLY_EXPENSE;
+        
+        if (hasOldFormat) {
+          console.log('⚠️ OLD FORMAT DETECTED - Running migration...');
+          
+          // Merge old format
+          const dailyExpenses = firestoreCategories.DAILY_EXPENSE || [];
+          const monthlyExpenses = firestoreCategories.MONTHLY_EXPENSE || [];
+          const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
+          
+          console.log(`Merging: ${dailyExpenses.length} daily + ${monthlyExpenses.length} monthly = ${mergedExpenses.length} total`);
+          console.log('Merged categories:', mergedExpenses);
+          
+          // Create new format
+          const newFormat = {
+            INCOME: firestoreCategories.INCOME || [],
+            EXPENSE: mergedExpenses
+          };
+          
+          state.categories = newFormat;
+          
+          console.log('💾 STEP 1: Deleting old document...');
+          await docRef.delete();
+          
+          console.log('💾 STEP 2: Creating new document...');
+          await docRef.set(newFormat);
+          
+          console.log('✅ Migration complete');
+        } else if (firestoreCategories.EXPENSE) {
+          // Already in new format
+          console.log('✓ Using new format');
+          state.categories = {
+            INCOME: firestoreCategories.INCOME || [],
+            EXPENSE: firestoreCategories.EXPENSE || []
+          };
+        } else {
+          console.log('⚠️ No recognized category fields, using defaults');
+        }
       }
       
       console.log('Final categories - INCOME:', state.categories.INCOME?.length, 'EXPENSE:', state.categories.EXPENSE?.length);
     } else {
       console.log('⚠️ No categories document, saving defaults');
-      await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').set(state.categories);
+      await docRef.set(state.categories);
     }
     
-    // Set up listener AFTER migration is complete
     setupCategoryListener();
   } catch (err) {
     console.error('❌ Category load error:', err);
