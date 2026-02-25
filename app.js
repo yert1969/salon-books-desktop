@@ -290,7 +290,8 @@ async function loadCategories() {
   try {
     console.log('=== Loading categories from Firebase ===');
     
-    const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
+    const docRef = firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories');
+    const doc = await docRef.get();
     
     if (doc.exists) {
       const firestoreCategories = doc.data();
@@ -300,7 +301,7 @@ async function loadCategories() {
       const hasOldFormat = firestoreCategories.DAILY_EXPENSE || firestoreCategories.MONTHLY_EXPENSE;
       
       if (hasOldFormat) {
-        console.log('⚠️ OLD FORMAT DETECTED - Migrating...');
+        console.log('⚠️ OLD FORMAT DETECTED - Running migration...');
         
         // Merge old format
         const dailyExpenses = firestoreCategories.DAILY_EXPENSE || [];
@@ -308,30 +309,36 @@ async function loadCategories() {
         const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
         
         console.log(`Merging: ${dailyExpenses.length} daily + ${monthlyExpenses.length} monthly = ${mergedExpenses.length} total`);
+        console.log('Merged categories:', mergedExpenses);
         
-        // Create new format - ONLY INCOME and EXPENSE fields
+        // Create new format - ONLY these two fields
         const newFormat = {
           INCOME: firestoreCategories.INCOME || [],
           EXPENSE: mergedExpenses
         };
         
-        // Update state
+        // Update local state
         state.categories = newFormat;
         
-        // Save to Firebase - .set() will REPLACE the entire document
-        console.log('💾 Saving new format to Firebase (this DELETES old fields)...');
-        await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').set(newFormat);
+        console.log('💾 STEP 1: Deleting old document completely...');
+        await docRef.delete();
         
-        // Verify the save worked
-        const verifyDoc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
-        const verifyData = verifyDoc.data();
-        console.log('✓ Migration saved. Firebase now has:', Object.keys(verifyData));
-        console.log('✓ EXPENSE count:', verifyData.EXPENSE?.length);
+        console.log('💾 STEP 2: Creating new document with unified format...');
+        await docRef.set(newFormat);
         
-        if (verifyData.DAILY_EXPENSE || verifyData.MONTHLY_EXPENSE) {
-          console.error('❌ Migration failed - old fields still exist!');
-        } else {
-          console.log('✓ Migration successful - old fields removed');
+        console.log('💾 STEP 3: Verifying migration...');
+        const verifyDoc = await docRef.get();
+        if (verifyDoc.exists) {
+          const verifyData = verifyDoc.data();
+          console.log('✓ Firebase now has fields:', Object.keys(verifyData));
+          console.log('✓ INCOME count:', verifyData.INCOME?.length);
+          console.log('✓ EXPENSE count:', verifyData.EXPENSE?.length);
+          
+          if (verifyData.DAILY_EXPENSE || verifyData.MONTHLY_EXPENSE) {
+            console.error('❌❌❌ MIGRATION FAILED - OLD FIELDS STILL EXIST ❌❌❌');
+          } else {
+            console.log('✅✅✅ MIGRATION SUCCESSFUL ✅✅✅');
+          }
         }
       } else if (firestoreCategories.EXPENSE) {
         // Already in new format
