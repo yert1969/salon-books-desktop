@@ -3603,7 +3603,7 @@ async function renderSettingsView() {
   checkImportedData();
 }
 
-function addCategory(type) {
+async function addCategory(type) {
   let inputId;
   if (type === 'INCOME') inputId = 'new-income-cat';
   else if (type === 'EXPENSE') inputId = 'new-expense-cat';
@@ -3626,16 +3626,16 @@ function addCategory(type) {
   }
   
   state.categories[type].push(newCat);
-  saveCategories();
+  await saveCategories();
   input.value = '';
   renderSettingsView();
 }
 
-function removeCategory(type, index) {
+async function removeCategory(type, index) {
   if (!confirm('Remove this category?')) return;
   
   state.categories[type].splice(index, 1);
-  saveCategories();
+  await saveCategories();
   renderSettingsView();
 }
 
