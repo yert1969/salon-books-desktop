@@ -3393,11 +3393,23 @@ async function renderSettingsView() {
     </div>
     
     <div class="card">
-      <div style="background:#FFF9E6; border-left:4px solid #F59E0B; padding:12px; margin-bottom:16px; font-size:13px; border-radius:4px;">
-        <strong>Debug Info:</strong> Expense categories loaded: ${(state.categories.EXPENSE || []).length}
-        <button class="btn-secondary" onclick="debugCategories()" style="margin-left:12px; padding:4px 12px; font-size:12px;">
-          Show Debug Info
-        </button>
+      <div style="background:#FFE6E6; border-left:4px solid #C13838; padding:16px; margin-bottom:16px; border-radius:4px;">
+        <div style="font-weight:600; margin-bottom:8px; font-size:15px;">🐛 Category Sync Debug Tools</div>
+        <div style="font-size:13px; color:var(--text-muted); margin-bottom:12px;">
+          Desktop showing: <strong>${(state.categories.EXPENSE || []).length} expense categories</strong><br>
+          Mobile should have: <strong>18 expense categories</strong>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-secondary" onclick="fullCategoryDiagnosis()" style="padding:8px 16px; font-size:13px; font-weight:600;">
+            📊 Run Full Diagnosis
+          </button>
+          <button class="btn-primary" onclick="forceFixCategories()" style="padding:8px 16px; font-size:13px; font-weight:600; background:#C13838;">
+            🔧 FORCE FIX - Sync from Mobile
+          </button>
+        </div>
+        <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">
+          Click "Run Full Diagnosis" and check browser console (F12) for detailed info
+        </div>
       </div>
     </div>
     
@@ -4514,3 +4526,121 @@ console.log('  Ctrl+E = Add Expense');
 console.log('  Ctrl+D = Daily View');
 console.log('  Ctrl+M = Monthly View');
 console.log('  Ctrl+R = Reports View');
+// COMPREHENSIVE CATEGORY DEBUGGING TOOL
+// Add this to app.js temporarily to diagnose the exact issue
+
+async function fullCategoryDiagnosis() {
+  console.log('='.repeat(80));
+  console.log('COMPREHENSIVE CATEGORY DIAGNOSIS');
+  console.log('='.repeat(80));
+  
+  // 1. Check current state
+  console.log('\n1. CURRENT STATE (Desktop):');
+  console.log('state.categories:', JSON.parse(JSON.stringify(state.categories)));
+  console.log('INCOME count:', state.categories.INCOME?.length);
+  console.log('EXPENSE count:', state.categories.EXPENSE?.length);
+  console.log('EXPENSE list:', state.categories.EXPENSE);
+  
+  // 2. Check Firebase
+  console.log('\n2. FIREBASE DATA:');
+  try {
+    const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
+    if (doc.exists) {
+      const fbData = doc.data();
+      console.log('Raw Firebase data:', JSON.parse(JSON.stringify(fbData)));
+      
+      console.log('\nFirebase fields present:');
+      console.log('- Has INCOME?', !!fbData.INCOME, fbData.INCOME?.length || 0);
+      console.log('- Has EXPENSE?', !!fbData.EXPENSE, fbData.EXPENSE?.length || 0);
+      console.log('- Has DAILY_EXPENSE?', !!fbData.DAILY_EXPENSE, fbData.DAILY_EXPENSE?.length || 0);
+      console.log('- Has MONTHLY_EXPENSE?', !!fbData.MONTHLY_EXPENSE, fbData.MONTHLY_EXPENSE?.length || 0);
+      
+      if (fbData.EXPENSE) {
+        console.log('\nFirebase EXPENSE categories:', fbData.EXPENSE);
+      }
+      if (fbData.DAILY_EXPENSE) {
+        console.log('\nFirebase DAILY_EXPENSE categories:', fbData.DAILY_EXPENSE);
+      }
+      if (fbData.MONTHLY_EXPENSE) {
+        console.log('\nFirebase MONTHLY_EXPENSE categories:', fbData.MONTHLY_EXPENSE);
+      }
+    } else {
+      console.log('NO CATEGORIES DOCUMENT IN FIREBASE!');
+    }
+  } catch (err) {
+    console.error('Error reading Firebase:', err);
+  }
+  
+  // 3. Check IndexedDB
+  console.log('\n3. INDEXEDDB DATA:');
+  try {
+    const localSettings = await db.settings.toArray();
+    console.log('Local settings:', localSettings);
+    const catSettings = localSettings.find(s => s.key === 'categories');
+    if (catSettings) {
+      const localCats = JSON.parse(catSettings.value);
+      console.log('IndexedDB categories:', localCats);
+    } else {
+      console.log('No categories in IndexedDB');
+    }
+  } catch (err) {
+    console.error('Error reading IndexedDB:', err);
+  }
+  
+  // 4. What mobile should have
+  console.log('\n4. EXPECTED MOBILE CATEGORIES (from screenshot):');
+  const mobileCategories = [
+    'Supplies', 'Products', 'Tools/Equipment', 'Advertising',
+    'Education', 'Meals', 'Employee Pay', 'Misc Daily',
+    'Rent', 'Electric', 'Water', 'Gas', 'Insurance',
+    'Cleaning Service', 'Booking Software', 'Phone',
+    'Marketing', 'Misc Monthly'
+  ];
+  console.log('Mobile has:', mobileCategories);
+  console.log('Mobile count:', mobileCategories.length);
+  
+  // 5. What's missing
+  console.log('\n5. MISSING FROM DESKTOP:');
+  const desktopHas = state.categories.EXPENSE || [];
+  const missing = mobileCategories.filter(cat => !desktopHas.includes(cat));
+  console.log('Missing categories:', missing);
+  console.log('Missing count:', missing.length);
+  
+  // 6. What desktop has that mobile doesn't
+  console.log('\n6. EXTRA ON DESKTOP:');
+  const extra = desktopHas.filter(cat => !mobileCategories.includes(cat));
+  console.log('Extra categories:', extra);
+  
+  console.log('\n' + '='.repeat(80));
+  console.log('DIAGNOSIS COMPLETE - Check console above');
+  console.log('='.repeat(80));
+  
+  return {
+    desktopCount: desktopHas.length,
+    mobileCount: mobileCategories.length,
+    missing: missing,
+    extra: extra
+  };
+}
+
+// Function to force merge with mobile's categories
+async function forceFixCategories() {
+  const mobileCategories = [
+    'Supplies', 'Products', 'Tools/Equipment', 'Advertising',
+    'Education', 'Meals', 'Employee Pay', 'Misc Daily',
+    'Rent', 'Electric', 'Water', 'Gas', 'Insurance',
+    'Cleaning Service', 'Booking Software', 'Phone',
+    'Marketing', 'Misc Monthly'
+  ];
+  
+  console.log('FORCING FIX: Setting EXPENSE to match mobile...');
+  
+  state.categories.EXPENSE = mobileCategories;
+  
+  await saveCategories();
+  
+  console.log('Categories saved. Reloading Settings...');
+  await renderSettingsView();
+  
+  alert('Categories synced! Desktop now has ' + mobileCategories.length + ' expense categories.');
+}
