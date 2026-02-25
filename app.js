@@ -3389,30 +3389,19 @@ async function renderSettingsView() {
     <div class="card" style="margin-top:16px;">
       <h3 style="font-size:18px; margin-bottom:16px;">Expense Categories</h3>
       <div id="all-expense-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
-        ${(() => {
-          const dailyExpenses = state.categories.DAILY_EXPENSE || [];
-          const monthlyExpenses = state.categories.MONTHLY_EXPENSE || [];
-          const allExpenses = [...dailyExpenses, ...monthlyExpenses];
-          
-          return allExpenses.map(cat => {
-            // Determine which type this category belongs to
-            const type = dailyExpenses.includes(cat) ? 'DAILY_EXPENSE' : 'MONTHLY_EXPENSE';
-            const idx = state.categories[type].indexOf(cat);
-            return `
-              <div class="category-tag">
-                ${cat}
-                <button onclick="removeCategory('${type}', ${idx})" class="category-remove">×</button>
-              </div>
-            `;
-          }).join('');
-        })()}
+        ${(state.categories.EXPENSE || []).map((cat, idx) => `
+          <div class="category-tag">
+            ${cat}
+            <button onclick="removeCategory('EXPENSE', ${idx})" class="category-remove">×</button>
+          </div>
+        `).join('')}
       </div>
       <div style="display:flex; gap:8px;">
         <input type="text" id="new-expense-cat" class="form-input" placeholder="New category name">
         <button class="btn-primary" onclick="addCategory('EXPENSE')">Add</button>
       </div>
       <p style="color:var(--text-muted); font-size:13px; margin-top:12px;">
-        All expense categories (both daily and monthly) are shown here.
+        All expense categories (used for both daily and monthly expenses)
       </p>
     </div>
     
@@ -3551,28 +3540,28 @@ async function renderSettingsView() {
 }
 
 function addCategory(type) {
-  // For generic 'EXPENSE', default to DAILY_EXPENSE
-  const actualType = type === 'EXPENSE' ? 'DAILY_EXPENSE' : type;
-  
   let inputId;
   if (type === 'INCOME') inputId = 'new-income-cat';
-  else if (type === 'EXPENSE' || type === 'DAILY_EXPENSE') inputId = 'new-expense-cat';
-  else if (type === 'MONTHLY_EXPENSE') inputId = 'new-monthly-cat';
+  else if (type === 'EXPENSE') inputId = 'new-expense-cat';
   
   const input = document.getElementById(inputId);
-  const newCat = input.value.trim();
+  const newCat = input?.value.trim();
   
   if (!newCat) {
     showToast('Please enter a category name');
     return;
   }
   
-  if (state.categories[actualType].includes(newCat)) {
+  if (state.categories[type]?.includes(newCat)) {
     showToast('Category already exists');
     return;
   }
   
-  state.categories[actualType].push(newCat);
+  if (!state.categories[type]) {
+    state.categories[type] = [];
+  }
+  
+  state.categories[type].push(newCat);
   saveCategories();
   input.value = '';
   renderSettingsView();
