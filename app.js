@@ -304,23 +304,36 @@ async function loadCategories() {
         console.log('value field:', firestoreCategories.value);
         console.log('key field:', firestoreCategories.key);
         
-        // Try to extract actual data from whatever this is
-        let actualData = firestoreCategories;
-        if (firestoreCategories.value && typeof firestoreCategories.value === 'object') {
-          console.log('Attempting to use .value field as actual data...');
-          actualData = firestoreCategories.value;
-          console.log('Extracted data:', actualData);
+        // The .value field is a JSON STRING - parse it!
+        let actualData = null;
+        
+        if (firestoreCategories.value) {
+          if (typeof firestoreCategories.value === 'string') {
+            console.log('Parsing .value as JSON string...');
+            try {
+              actualData = JSON.parse(firestoreCategories.value);
+              console.log('✓ Parsed successfully:', actualData);
+            } catch (e) {
+              console.error('Failed to parse .value as JSON:', e);
+            }
+          } else if (typeof firestoreCategories.value === 'object') {
+            console.log('Using .value as object directly...');
+            actualData = firestoreCategories.value;
+          }
         }
         
-        // Now check this extracted data
-        const hasOldFormat = actualData.DAILY_EXPENSE || actualData.MONTHLY_EXPENSE;
-        
-        if (hasOldFormat || actualData.EXPENSE) {
-          console.log('Found valid category data inside .value field!');
-          console.log('Processing as normal...');
+        if (actualData && (actualData.INCOME || actualData.EXPENSE || actualData.DAILY_EXPENSE || actualData.MONTHLY_EXPENSE)) {
+          console.log('✓ Found valid category data!');
+          console.log('INCOME count:', actualData.INCOME?.length);
+          console.log('EXPENSE count:', actualData.EXPENSE?.length);
+          console.log('DAILY_EXPENSE count:', actualData.DAILY_EXPENSE?.length);
+          console.log('MONTHLY_EXPENSE count:', actualData.MONTHLY_EXPENSE?.length);
+          
+          // Check if we need to merge old format
+          const hasOldFormat = actualData.DAILY_EXPENSE || actualData.MONTHLY_EXPENSE;
           
           if (hasOldFormat) {
-            // Merge and migrate
+            console.log('Old format detected, merging...');
             const dailyExpenses = actualData.DAILY_EXPENSE || [];
             const monthlyExpenses = actualData.MONTHLY_EXPENSE || [];
             const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
@@ -329,6 +342,8 @@ async function loadCategories() {
               INCOME: actualData.INCOME || [],
               EXPENSE: mergedExpenses
             };
+            
+            console.log(`Merged: ${dailyExpenses.length} + ${monthlyExpenses.length} = ${mergedExpenses.length}`);
           } else {
             state.categories = {
               INCOME: actualData.INCOME || [],
@@ -337,13 +352,16 @@ async function loadCategories() {
           }
           
           // Save clean format
-          console.log('💾 Saving clean format without value/key wrapper...');
+          console.log('💾 Deleting broken document...');
           await docRef.delete();
+          
+          console.log('💾 Creating clean document...');
           await docRef.set(state.categories);
           
-          console.log('✓ Fixed broken format');
+          console.log('✅ Fixed broken format!');
+          console.log('Final: INCOME:', state.categories.INCOME?.length, 'EXPENSE:', state.categories.EXPENSE?.length);
         } else {
-          console.error('Cannot extract valid category data - using defaults');
+          console.error('❌ Cannot extract valid category data - using defaults');
         }
       }
       // Normal processing
