@@ -672,7 +672,8 @@ function updateQuickForm() {
   }
   
   const categories = type === 'INCOME' ? state.categories.INCOME : state.categories.DAILY_EXPENSE;
-  categoryEl.innerHTML = categories.map(c => `<option value="${c}">${c}</option>`).join('');
+  const sortedCategories = [...categories].sort();  // Sort alphabetically
+  categoryEl.innerHTML = sortedCategories.map(c => `<option value="${c}">${c}</option>`).join('');
   
   paymentGroup.style.display = type === 'INCOME' ? 'block' : 'none';
 }
@@ -1259,7 +1260,8 @@ function updateEntryForm() {
   // Update category dropdown
   if (categorySelect) {
     const categories = type === 'INCOME' ? state.categories.INCOME : state.categories.EXPENSE;
-    categorySelect.innerHTML = categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+    const sortedCategories = [...categories].sort();  // Sort alphabetically
+    categorySelect.innerHTML = sortedCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
   }
 }
 
@@ -3563,7 +3565,7 @@ async function renderSettingsView() {
     <div class="card">
       <h3 style="font-size:18px; margin-bottom:16px;">Income Categories</h3>
       <div id="income-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
-        ${state.categories.INCOME.map((cat, idx) => `
+        ${[...state.categories.INCOME].sort().map((cat, idx) => `
           <div class="category-tag">
             ${cat}
             <button onclick="removeCategory('INCOME', ${idx})" class="category-remove">×</button>
@@ -3579,7 +3581,7 @@ async function renderSettingsView() {
     <div class="card" style="margin-top:16px;">
       <h3 style="font-size:18px; margin-bottom:16px;">Expense Categories (${(state.categories.EXPENSE || []).length} total)</h3>
       <div id="all-expense-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
-        ${(state.categories.EXPENSE || []).map((cat, idx) => `
+        ${[...(state.categories.EXPENSE || [])].sort().map((cat, idx) => `
           <div class="category-tag">
             ${cat}
             <button onclick="removeCategory('EXPENSE', ${idx})" class="category-remove">×</button>
