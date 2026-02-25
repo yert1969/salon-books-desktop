@@ -289,10 +289,23 @@ async function loadCategories() {
   
   try {
     console.log('=== Loading categories from Firebase ===');
+    console.log('User ID:', currentUser.uid);
+    console.log('Path: users/' + currentUser.uid + '/settings/categories');
+    
     const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
+    
+    console.log('Document exists?', doc.exists);
+    
     if (doc.exists) {
       const firestoreCategories = doc.data();
       console.log('Firebase raw data:', JSON.parse(JSON.stringify(firestoreCategories)));
+      console.log('Firebase data keys:', Object.keys(firestoreCategories));
+      
+      // Check what fields actually exist
+      console.log('Has INCOME field?', firestoreCategories.hasOwnProperty('INCOME'));
+      console.log('Has EXPENSE field?', firestoreCategories.hasOwnProperty('EXPENSE'));
+      console.log('Has DAILY_EXPENSE field?', firestoreCategories.hasOwnProperty('DAILY_EXPENSE'));
+      console.log('Has MONTHLY_EXPENSE field?', firestoreCategories.hasOwnProperty('MONTHLY_EXPENSE'));
       
       // PRIORITY: Check if old format exists (DAILY_EXPENSE or MONTHLY_EXPENSE)
       // Even if EXPENSE exists, if old format exists, we need to re-merge to ensure completeness
@@ -322,6 +335,9 @@ async function loadCategories() {
       } else if (firestoreCategories.EXPENSE) {
         // New unified format only (no old format fields)
         console.log('✓ New format detected (unified EXPENSE only)');
+        console.log('EXPENSE array length:', firestoreCategories.EXPENSE.length);
+        console.log('EXPENSE contents:', firestoreCategories.EXPENSE);
+        
         state.categories = {
           INCOME: firestoreCategories.INCOME && firestoreCategories.INCOME.length > 0 
             ? firestoreCategories.INCOME 
@@ -330,9 +346,14 @@ async function loadCategories() {
             ? firestoreCategories.EXPENSE 
             : state.categories.EXPENSE
         };
+      } else if (firestoreCategories.INCOME) {
+        // Has INCOME but no EXPENSE fields at all
+        console.log('⚠️ Has INCOME but missing EXPENSE - using defaults for EXPENSE');
+        state.categories.INCOME = firestoreCategories.INCOME;
+        // Keep default EXPENSE
       } else {
-        // No categories at all
-        console.log('⚠️ No categories found, using defaults');
+        // No recognizable fields
+        console.log('⚠️ No recognizable category fields found');
       }
       
       console.log('Final state.categories:', JSON.parse(JSON.stringify(state.categories)));
