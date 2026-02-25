@@ -409,11 +409,20 @@ async function loadCategories() {
       
       console.log('Final categories - INCOME:', state.categories.INCOME?.length, 'EXPENSE:', state.categories.EXPENSE?.length);
     } else {
-      console.log('⚠️ No categories document, saving defaults');
-      await docRef.set(state.categories);
+      // No Firebase document - use defaults locally, DON'T save to Firebase yet
+      console.log('No categories in Firebase yet - using defaults locally');
+      state.categories = {
+        INCOME: [],
+        EXPENSE: []
+      };
     }
   } catch (err) {
     console.error('❌ Category load error:', err);
+    // On error, use defaults locally
+    state.categories = {
+      INCOME: [],
+      EXPENSE: []
+    };
   }
 }
 
