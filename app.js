@@ -412,86 +412,13 @@ async function loadCategories() {
       console.log('⚠️ No categories document, saving defaults');
       await docRef.set(state.categories);
     }
-    
-    setupCategoryListener();
   } catch (err) {
     console.error('❌ Category load error:', err);
   }
 }
 
-// Real-time category sync listener
-let categoryUnsubscribe = null;
-
-function setupCategoryListener() {
-  if (!currentUser) return;
-  
-  // Unsubscribe from previous listener if exists
-  if (categoryUnsubscribe) {
-    categoryUnsubscribe();
-  }
-  
-  // Listen for category changes in Firebase
-  categoryUnsubscribe = firestore.collection('users')
-    .doc(currentUser.uid)
-    .collection('settings')
-    .doc('categories')
-    .onSnapshot((doc) => {
-      if (doc.exists) {
-        const firestoreCategories = doc.data();
-        
-        // ONLY process new format (EXPENSE field)
-        // Ignore old format completely - migration handles that
-        if (firestoreCategories.EXPENSE) {
-          console.log('📡 Categories synced from Firebase');
-          
-          state.categories = {
-            INCOME: firestoreCategories.INCOME || [],
-            EXPENSE: firestoreCategories.EXPENSE || []
-          };
-          
-          console.log('Updated categories - INCOME:', state.categories.INCOME?.length, 'EXPENSE:', state.categories.EXPENSE?.length);
-          
-          // Re-render current view to show updated categories
-          if (state.currentView === 'settings') {
-            // Just update the DOM without reloading
-            const incomeContainer = document.getElementById('income-categories');
-            const expenseContainer = document.getElementById('all-expense-categories');
-            
-            if (incomeContainer) {
-              incomeContainer.innerHTML = state.categories.INCOME.map((cat, idx) => `
-                <div class="category-tag">
-                  ${cat}
-                  <button onclick="removeCategory('INCOME', ${idx})" class="category-remove">×</button>
-                </div>
-              `).join('');
-            }
-            
-            if (expenseContainer) {
-              expenseContainer.innerHTML = state.categories.EXPENSE.map((cat, idx) => `
-                <div class="category-tag">
-                  ${cat}
-                  <button onclick="removeCategory('EXPENSE', ${idx})" class="category-remove">×</button>
-                </div>
-              `).join('');
-            }
-            
-            // Update count
-            const cards = document.querySelectorAll('.card h3');
-            cards.forEach(h3 => {
-              if (h3.textContent.includes('Expense Categories')) {
-                h3.textContent = `Expense Categories (${state.categories.EXPENSE.length} total)`;
-              }
-            });
-          }
-        } else {
-          // Old format detected - ignore it, migration will handle it
-          console.log('📡 Received old format from Firebase - ignoring (migration will handle)');
-        }
-      }
-    }, (error) => {
-      console.error('Category listener error:', error);
-    });
-}
+// Categories are synced on page load/refresh, not in real-time
+// This avoids race conditions with Firebase listeners
 
 async function saveCategories() {
   if (!currentUser) return;
