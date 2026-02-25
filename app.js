@@ -289,82 +289,69 @@ async function loadCategories() {
   
   try {
     console.log('=== Loading categories from Firebase ===');
-    console.log('User ID:', currentUser.uid);
-    console.log('Path: users/' + currentUser.uid + '/settings/categories');
     
     const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
     
-    console.log('Document exists?', doc.exists);
-    
     if (doc.exists) {
       const firestoreCategories = doc.data();
-      console.log('Firebase raw data:', JSON.parse(JSON.stringify(firestoreCategories)));
-      console.log('Firebase data keys:', Object.keys(firestoreCategories));
+      console.log('Firebase has:', Object.keys(firestoreCategories));
       
-      // Check what fields actually exist
-      console.log('Has INCOME field?', firestoreCategories.hasOwnProperty('INCOME'));
-      console.log('Has EXPENSE field?', firestoreCategories.hasOwnProperty('EXPENSE'));
-      console.log('Has DAILY_EXPENSE field?', firestoreCategories.hasOwnProperty('DAILY_EXPENSE'));
-      console.log('Has MONTHLY_EXPENSE field?', firestoreCategories.hasOwnProperty('MONTHLY_EXPENSE'));
+      // Check if old format exists
+      const hasOldFormat = firestoreCategories.DAILY_EXPENSE || firestoreCategories.MONTHLY_EXPENSE;
       
-      // PRIORITY: Check if old format exists (DAILY_EXPENSE or MONTHLY_EXPENSE)
-      // Even if EXPENSE exists, if old format exists, we need to re-merge to ensure completeness
-      if (firestoreCategories.DAILY_EXPENSE || firestoreCategories.MONTHLY_EXPENSE) {
-        console.log('⚠️ OLD FORMAT DETECTED - Migrating to unified EXPENSE format');
+      if (hasOldFormat) {
+        console.log('⚠️ OLD FORMAT DETECTED - Migrating...');
         
-        // Merge DAILY_EXPENSE and MONTHLY_EXPENSE into EXPENSE
+        // Merge old format
         const dailyExpenses = firestoreCategories.DAILY_EXPENSE || [];
         const monthlyExpenses = firestoreCategories.MONTHLY_EXPENSE || [];
-        console.log('DAILY_EXPENSE:', dailyExpenses);
-        console.log('MONTHLY_EXPENSE:', monthlyExpenses);
+        const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
         
-        const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])]; // Remove duplicates
-        console.log('Merged EXPENSE:', mergedExpenses, 'Count:', mergedExpenses.length);
+        console.log(`Merging: ${dailyExpenses.length} daily + ${monthlyExpenses.length} monthly = ${mergedExpenses.length} total`);
         
-        state.categories = {
-          INCOME: firestoreCategories.INCOME && firestoreCategories.INCOME.length > 0 
-            ? firestoreCategories.INCOME 
-            : state.categories.INCOME,
-          EXPENSE: mergedExpenses.length > 0 ? mergedExpenses : state.categories.EXPENSE
+        // Create new format - ONLY INCOME and EXPENSE fields
+        const newFormat = {
+          INCOME: firestoreCategories.INCOME || [],
+          EXPENSE: mergedExpenses
         };
         
-        // Save merged format back to Firebase (this will remove old fields)
-        console.log('💾 Saving migrated categories to Firebase...');
-        await saveCategories();
-        console.log('✓ Migration complete!');
+        // Update state
+        state.categories = newFormat;
+        
+        // Save to Firebase - .set() will REPLACE the entire document
+        console.log('💾 Saving new format to Firebase (this DELETES old fields)...');
+        await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').set(newFormat);
+        
+        // Verify the save worked
+        const verifyDoc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
+        const verifyData = verifyDoc.data();
+        console.log('✓ Migration saved. Firebase now has:', Object.keys(verifyData));
+        console.log('✓ EXPENSE count:', verifyData.EXPENSE?.length);
+        
+        if (verifyData.DAILY_EXPENSE || verifyData.MONTHLY_EXPENSE) {
+          console.error('❌ Migration failed - old fields still exist!');
+        } else {
+          console.log('✓ Migration successful - old fields removed');
+        }
       } else if (firestoreCategories.EXPENSE) {
-        // New unified format only (no old format fields)
-        console.log('✓ New format detected (unified EXPENSE only)');
-        console.log('EXPENSE array length:', firestoreCategories.EXPENSE.length);
-        console.log('EXPENSE contents:', firestoreCategories.EXPENSE);
-        
+        // Already in new format
+        console.log('✓ Using new format');
         state.categories = {
-          INCOME: firestoreCategories.INCOME && firestoreCategories.INCOME.length > 0 
-            ? firestoreCategories.INCOME 
-            : state.categories.INCOME,
-          EXPENSE: firestoreCategories.EXPENSE && firestoreCategories.EXPENSE.length > 0 
-            ? firestoreCategories.EXPENSE 
-            : state.categories.EXPENSE
+          INCOME: firestoreCategories.INCOME || [],
+          EXPENSE: firestoreCategories.EXPENSE || []
         };
-      } else if (firestoreCategories.INCOME) {
-        // Has INCOME but no EXPENSE fields at all
-        console.log('⚠️ Has INCOME but missing EXPENSE - using defaults for EXPENSE');
-        state.categories.INCOME = firestoreCategories.INCOME;
-        // Keep default EXPENSE
       } else {
-        // No recognizable fields
-        console.log('⚠️ No recognizable category fields found');
+        // No categories at all
+        console.log('⚠️ No categories found, using defaults');
       }
       
-      console.log('Final state.categories:', JSON.parse(JSON.stringify(state.categories)));
-      console.log('INCOME count:', state.categories.INCOME?.length);
-      console.log('EXPENSE count:', state.categories.EXPENSE?.length);
+      console.log('Final categories - INCOME:', state.categories.INCOME?.length, 'EXPENSE:', state.categories.EXPENSE?.length);
     } else {
-      console.log('⚠️ No categories document in Firebase, saving defaults');
-      await saveCategories();
+      console.log('⚠️ No categories document, saving defaults');
+      await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').set(state.categories);
     }
     
-    // Set up real-time listener for category changes
+    // Set up listener AFTER migration is complete
     setupCategoryListener();
   } catch (err) {
     console.error('❌ Category load error:', err);
@@ -390,28 +377,55 @@ function setupCategoryListener() {
     .onSnapshot((doc) => {
       if (doc.exists) {
         const firestoreCategories = doc.data();
-        console.log('Categories updated in Firebase, syncing...');
         
-        // Support both formats
+        // ONLY process new format (EXPENSE field)
+        // Ignore old format completely - migration handles that
         if (firestoreCategories.EXPENSE) {
-          state.categories = {
-            INCOME: firestoreCategories.INCOME || state.categories.INCOME,
-            EXPENSE: firestoreCategories.EXPENSE || state.categories.EXPENSE
-          };
-        } else {
-          // Merge old format
-          const dailyExpenses = firestoreCategories.DAILY_EXPENSE || [];
-          const monthlyExpenses = firestoreCategories.MONTHLY_EXPENSE || [];
-          const mergedExpenses = [...new Set([...dailyExpenses, ...monthlyExpenses])];
+          console.log('📡 Categories synced from Firebase');
           
           state.categories = {
-            INCOME: firestoreCategories.INCOME || state.categories.INCOME,
-            EXPENSE: mergedExpenses.length > 0 ? mergedExpenses : state.categories.EXPENSE
+            INCOME: firestoreCategories.INCOME || [],
+            EXPENSE: firestoreCategories.EXPENSE || []
           };
+          
+          console.log('Updated categories - INCOME:', state.categories.INCOME?.length, 'EXPENSE:', state.categories.EXPENSE?.length);
+          
+          // Re-render current view to show updated categories
+          if (state.currentView === 'settings') {
+            // Just update the DOM without reloading
+            const incomeContainer = document.getElementById('income-categories');
+            const expenseContainer = document.getElementById('all-expense-categories');
+            
+            if (incomeContainer) {
+              incomeContainer.innerHTML = state.categories.INCOME.map((cat, idx) => `
+                <div class="category-tag">
+                  ${cat}
+                  <button onclick="removeCategory('INCOME', ${idx})" class="category-remove">×</button>
+                </div>
+              `).join('');
+            }
+            
+            if (expenseContainer) {
+              expenseContainer.innerHTML = state.categories.EXPENSE.map((cat, idx) => `
+                <div class="category-tag">
+                  ${cat}
+                  <button onclick="removeCategory('EXPENSE', ${idx})" class="category-remove">×</button>
+                </div>
+              `).join('');
+            }
+            
+            // Update count
+            const cards = document.querySelectorAll('.card h3');
+            cards.forEach(h3 => {
+              if (h3.textContent.includes('Expense Categories')) {
+                h3.textContent = `Expense Categories (${state.categories.EXPENSE.length} total)`;
+              }
+            });
+          }
+        } else {
+          // Old format detected - ignore it, migration will handle it
+          console.log('📡 Received old format from Firebase - ignoring (migration will handle)');
         }
-        
-        // Re-render current view to show updated categories
-        navigate(state.currentView);
       }
     }, (error) => {
       console.error('Category listener error:', error);
@@ -3550,27 +3564,6 @@ async function renderSettingsView() {
     </div>
     
     <div class="card">
-      <div style="background:#FFE6E6; border-left:4px solid #C13838; padding:16px; margin-bottom:16px; border-radius:4px;">
-        <div style="font-weight:600; margin-bottom:8px; font-size:15px;">🐛 Category Sync Debug Tools</div>
-        <div style="font-size:13px; color:var(--text-muted); margin-bottom:12px;">
-          Desktop showing: <strong>${(state.categories.EXPENSE || []).length} expense categories</strong><br>
-          Mobile should have: <strong>18 expense categories</strong>
-        </div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="btn-secondary" onclick="fullCategoryDiagnosis()" style="padding:8px 16px; font-size:13px; font-weight:600;">
-            📊 Run Full Diagnosis
-          </button>
-          <button class="btn-primary" onclick="forceFixCategories()" style="padding:8px 16px; font-size:13px; font-weight:600; background:#C13838;">
-            🔧 FORCE FIX - Sync from Mobile
-          </button>
-        </div>
-        <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">
-          Click "Run Full Diagnosis" and check browser console (F12) for detailed info
-        </div>
-      </div>
-    </div>
-    
-    <div class="card">
       <h3 style="font-size:18px; margin-bottom:16px;">Income Categories</h3>
       <div id="income-categories" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
         ${state.categories.INCOME.map((cat, idx) => `
@@ -4686,150 +4679,3 @@ console.log('  Ctrl+R = Reports View');
 // COMPREHENSIVE CATEGORY DEBUGGING TOOL
 // Add this to app.js temporarily to diagnose the exact issue
 
-async function fullCategoryDiagnosis() {
-  console.log('='.repeat(80));
-  console.log('COMPREHENSIVE CATEGORY DIAGNOSIS');
-  console.log('='.repeat(80));
-  
-  // 1. Check current state
-  console.log('\n1. CURRENT STATE (Desktop):');
-  console.log('state.categories:', JSON.parse(JSON.stringify(state.categories)));
-  console.log('INCOME count:', state.categories.INCOME?.length);
-  console.log('EXPENSE count:', state.categories.EXPENSE?.length);
-  console.log('EXPENSE list:', state.categories.EXPENSE);
-  
-  // 2. Check Firebase
-  console.log('\n2. FIREBASE DATA:');
-  try {
-    const doc = await firestore.collection('users').doc(currentUser.uid).collection('settings').doc('categories').get();
-    if (doc.exists) {
-      const fbData = doc.data();
-      console.log('Raw Firebase data:', JSON.parse(JSON.stringify(fbData)));
-      
-      console.log('\nFirebase fields present:');
-      console.log('- Has INCOME?', !!fbData.INCOME, fbData.INCOME?.length || 0);
-      console.log('- Has EXPENSE?', !!fbData.EXPENSE, fbData.EXPENSE?.length || 0);
-      console.log('- Has DAILY_EXPENSE?', !!fbData.DAILY_EXPENSE, fbData.DAILY_EXPENSE?.length || 0);
-      console.log('- Has MONTHLY_EXPENSE?', !!fbData.MONTHLY_EXPENSE, fbData.MONTHLY_EXPENSE?.length || 0);
-      
-      if (fbData.EXPENSE) {
-        console.log('\nFirebase EXPENSE categories:', fbData.EXPENSE);
-      }
-      if (fbData.DAILY_EXPENSE) {
-        console.log('\nFirebase DAILY_EXPENSE categories:', fbData.DAILY_EXPENSE);
-      }
-      if (fbData.MONTHLY_EXPENSE) {
-        console.log('\nFirebase MONTHLY_EXPENSE categories:', fbData.MONTHLY_EXPENSE);
-      }
-    } else {
-      console.log('NO CATEGORIES DOCUMENT IN FIREBASE!');
-    }
-  } catch (err) {
-    console.error('Error reading Firebase:', err);
-  }
-  
-  // 3. Check IndexedDB
-  console.log('\n3. INDEXEDDB DATA:');
-  try {
-    const localSettings = await db.settings.toArray();
-    console.log('Local settings:', localSettings);
-    const catSettings = localSettings.find(s => s.key === 'categories');
-    if (catSettings) {
-      const localCats = JSON.parse(catSettings.value);
-      console.log('IndexedDB categories:', localCats);
-    } else {
-      console.log('No categories in IndexedDB');
-    }
-  } catch (err) {
-    console.error('Error reading IndexedDB:', err);
-  }
-  
-  // 4. What mobile should have
-  console.log('\n4. EXPECTED MOBILE CATEGORIES (from screenshot):');
-  const mobileCategories = [
-    'Supplies', 'Products', 'Tools/Equipment', 'Advertising',
-    'Education', 'Meals', 'Employee Pay', 'Misc Daily',
-    'Rent', 'Electric', 'Water', 'Gas', 'Insurance',
-    'Cleaning Service', 'Booking Software', 'Phone',
-    'Marketing', 'Misc Monthly'
-  ];
-  console.log('Mobile has:', mobileCategories);
-  console.log('Mobile count:', mobileCategories.length);
-  
-  // 5. What's missing
-  console.log('\n5. MISSING FROM DESKTOP:');
-  const desktopHas = state.categories.EXPENSE || [];
-  const missing = mobileCategories.filter(cat => !desktopHas.includes(cat));
-  console.log('Missing categories:', missing);
-  console.log('Missing count:', missing.length);
-  
-  // 6. What desktop has that mobile doesn't
-  console.log('\n6. EXTRA ON DESKTOP:');
-  const extra = desktopHas.filter(cat => !mobileCategories.includes(cat));
-  console.log('Extra categories:', extra);
-  
-  console.log('\n' + '='.repeat(80));
-  console.log('DIAGNOSIS COMPLETE - Check console above');
-  console.log('='.repeat(80));
-  
-  return {
-    desktopCount: desktopHas.length,
-    mobileCount: mobileCategories.length,
-    missing: missing,
-    extra: extra
-  };
-}
-
-// Function to force merge with mobile's categories
-async function forceFixCategories() {
-  const mobileCategories = [
-    'Supplies', 'Products', 'Tools/Equipment', 'Advertising',
-    'Education', 'Meals', 'Employee Pay', 'Misc Daily',
-    'Rent', 'Electric', 'Water', 'Gas', 'Insurance',
-    'Cleaning Service', 'Booking Software', 'Phone',
-    'Marketing', 'Misc Monthly'
-  ];
-  
-  console.log('FORCING FIX: Setting EXPENSE to match mobile...');
-  console.log('Before:', state.categories.EXPENSE?.length);
-  
-  state.categories.EXPENSE = mobileCategories;
-  
-  console.log('After:', state.categories.EXPENSE?.length);
-  
-  await saveCategories();
-  
-  console.log('Categories saved to Firebase. Refreshing UI without reloading...');
-  
-  // Re-render the settings page WITHOUT calling loadCategories()
-  // Just update the UI directly
-  const incomeContainer = document.getElementById('income-categories');
-  const expenseContainer = document.getElementById('all-expense-categories');
-  
-  if (incomeContainer) {
-    incomeContainer.innerHTML = state.categories.INCOME.map((cat, idx) => `
-      <div class="category-tag">
-        ${cat}
-        <button onclick="removeCategory('INCOME', ${idx})" class="category-remove">×</button>
-      </div>
-    `).join('');
-  }
-  
-  if (expenseContainer) {
-    expenseContainer.innerHTML = state.categories.EXPENSE.map((cat, idx) => `
-      <div class="category-tag">
-        ${cat}
-        <button onclick="removeCategory('EXPENSE', ${idx})" class="category-remove">×</button>
-      </div>
-    `).join('');
-  }
-  
-  // Update the count in the header
-  const expenseHeader = document.querySelector('.card h3');
-  if (expenseHeader && expenseHeader.textContent.includes('Expense Categories')) {
-    expenseHeader.textContent = `Expense Categories (${state.categories.EXPENSE.length} total)`;
-  }
-  
-  showToast(`Categories synced! Desktop now has ${mobileCategories.length} expense categories.`);
-  console.log('Force fix complete!');
-}
