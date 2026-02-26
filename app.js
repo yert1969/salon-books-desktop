@@ -5363,68 +5363,88 @@ async function renderRentersView() {
   const outstanding    = expectedTotal - collectedTotal;
 
   const isCurrentWeek = ws === getWeekStart(todayStr());
+  
+  // Format due date nicely
+  const dueDate = new Date(weekDue + 'T12:00:00');
+  const dueDateStr = dueDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
   content.innerHTML = `
-    <div class="daily-date-bar">
-      <button class="date-nav-btn" onclick="rentersChangeWeek(-1)">‹</button>
-      <div class="current-date">Week of ${formatWeekRange(ws)}</div>
-      <button class="date-nav-btn" onclick="rentersChangeWeek(1)" ${isCurrentWeek ? 'disabled style="opacity:0.3"' : ''}>›</button>
+    <div class="page-header">
+      <h2 class="page-title">Booth Renters</h2>
+      <p class="page-subtitle">Week of ${formatWeekRange(ws)}</p>
     </div>
 
+    <!-- Summary Cards -->
     <div class="renters-summary">
       <div class="renters-sum-item">
-        <div class="renters-sum-label">Expected</div>
+        <div class="renters-sum-label">EXPECTED</div>
         <div class="renters-sum-value">${fmt(expectedTotal)}</div>
       </div>
       <div class="renters-sum-divider"></div>
       <div class="renters-sum-item">
-        <div class="renters-sum-label">Collected</div>
+        <div class="renters-sum-label">COLLECTED</div>
         <div class="renters-sum-value" style="color:var(--success)">${fmt(collectedTotal)}</div>
       </div>
       <div class="renters-sum-divider"></div>
       <div class="renters-sum-item">
-        <div class="renters-sum-label">Outstanding</div>
+        <div class="renters-sum-label">OUTSTANDING</div>
         <div class="renters-sum-value" style="color:${outstanding > 0 ? 'var(--danger)' : 'var(--success)'}">
           ${outstanding > 0 ? fmt(outstanding) : '✓ Paid'}
         </div>
       </div>
     </div>
 
-    <div class="renters-due-note">Rent due Saturday ${formatDateDisplay(weekDue)}</div>
+    <!-- Due Date Notice -->
+    <div style="margin:24px 0 32px 0; padding:16px; background:${outstanding === 0 ? 'var(--success-bg)' : 'white'}; border:1px solid ${outstanding === 0 ? 'var(--success)' : 'var(--border)'}; border-radius:8px; display:flex; align-items:center; gap:12px;">
+      ${outstanding === 0 ? '<span style="font-size:24px;">✅</span>' : '<span style="font-size:24px;">📅</span>'}
+      <div>
+        <div style="font-weight:600; color:${outstanding === 0 ? 'var(--success)' : 'var(--text)'};">
+          ${outstanding === 0 ? 'All rent collected!' : `Rent due ${dueDateStr}`}
+        </div>
+        ${outstanding > 0 ? `<div style="font-size:13px; color:var(--text-muted); margin-top:2px;">Still awaiting ${fmt(outstanding)}</div>` : ''}
+      </div>
+    </div>
 
-    <div id="renter-list">
+    <!-- Renter Cards -->
+    <div class="renter-cards-grid">
       ${renters.length === 0 ? `
-        <div class="empty-state" style="padding:40px 20px;">
-          <div style="font-size:36px;margin-bottom:12px;">👥</div>
-          <div style="font-weight:600;color:var(--plum);margin-bottom:6px;">No booth renters yet</div>
-          <div style="color:var(--text-muted);font-size:14px;">Tap + to add your first renter</div>
+        <div class="empty-state">
+          <div class="empty-state-icon">👥</div>
+          <div class="empty-state-title">No booth renters yet</div>
+          <div class="empty-state-description">Add your first renter to start tracking payments</div>
+          <button class="btn-primary" onclick="openAddRenterModal()" style="margin-top:16px;">Add Renter</button>
         </div>` :
         renters.map(r => {
           const p           = payMap[r.id];
           const status      = p ? getRentStatus(ws, p.datePaid) : 'unpaid';
-          const statusLabel = { ontime: 'On Time', late: 'Late', unpaid: 'Unpaid' }[status];
-          const statusClass = { ontime: 'status-ontime', late: 'status-late', unpaid: 'status-unpaid' }[status];
-          const icon        = { ontime: '✅', late: '⚠️', unpaid: '○' }[status];
+          const statusLabel = { ontime: 'On Time', late: 'Late', unpaid: 'Not paid yet' }[status];
+          const paidDate    = p ? new Date(p.datePaid + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' }) : '';
+          
           return `
-          <div class="renter-row" onclick="openRenterDetail('${r.id}')">
-            <div class="renter-icon">${icon}</div>
-            <div class="renter-info">
-              <div class="renter-name">${r.name}${r.booth ? ` <span class="renter-booth">Booth ${r.booth}</span>` : ''}</div>
-              <div class="renter-meta">
-                ${p
-                  ? `Paid ${formatDateDisplay(p.datePaid)} · ${p.paymentMethod} · <span class="${statusClass}">${statusLabel}</span>`
-                  : `<span class="${statusClass}">Not yet paid</span> · Due ${fmt(r.weeklyRate || 0)}`}
+          <div class="renter-card ${p ? 'paid' : 'unpaid'}">
+            <div class="renter-card-icon">
+              ${p ? '<span style="font-size:24px;">✅</span>' : '<span style="font-size:24px; opacity:0.3;">⭕</span>'}
+            </div>
+            <div class="renter-card-content">
+              <div class="renter-card-name">${r.name}</div>
+              <div class="renter-card-details">
+                ${p 
+                  ? `Paid ${paidDate} · ${p.paymentMethod} · ${statusLabel}`
+                  : `${statusLabel} · Due ${fmt(r.weeklyRate || 0)}`
+                }
               </div>
             </div>
-            <div class="renter-amount">
-              <div style="font-weight:700;color:${p ? 'var(--success)' : 'var(--text-muted)'}">${p ? fmt(p.amount) : fmt(r.weeklyRate || 0)}</div>
-              ${!p ? `<button class="renter-pay-btn" onclick="event.stopPropagation();openLogPaymentModal('${r.id}')">Log Payment</button>` : ''}
+            <div class="renter-card-amount">
+              <div style="font-size:20px; font-weight:700; color:${p ? 'var(--success)' : 'var(--text-muted)'};">
+                ${fmt(p ? p.amount : r.weeklyRate || 0)}
+              </div>
+              ${!p ? `<button class="btn-primary" style="margin-top:8px; font-size:13px; padding:6px 12px;" onclick="event.stopPropagation();openLogPaymentModal('${r.id}')">Log Payment</button>` : ''}
             </div>
           </div>`;
         }).join('')
       }
     </div>
-    <div style="height:20px;"></div>
+    <div style="height:40px;"></div>
   `;
 }
 

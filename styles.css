@@ -1547,3 +1547,92 @@ body {
   box-shadow: 0 4px 12px rgba(107, 26, 42, 0.3);
 }
 
+
+/* ============================================================
+   RENTER CARDS GRID
+   ============================================================ */
+
+.renter-cards-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.renter-card {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  transition: all 0.2s;
+  box-shadow: var(--shadow-sm);
+}
+
+.renter-card:hover {
+  border-color: var(--plum);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+.renter-card.paid {
+  background: linear-gradient(to right, #f0fdf4 0%, white 100%);
+  border-left: 4px solid var(--success);
+}
+
+.renter-card-icon {
+  flex-shrink: 0;
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.renter-card-content {
+  flex: 1;
+}
+
+.renter-card-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.renter-card-details {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.renter-card-amount {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+
+/* ============================================================
+   CHART STYLING
+   ============================================================ */
+
+.pie-chart-wrap {
+  max-width: 400px;
+  margin: 24px auto;
+  padding: 20px;
+}
+
+.pie-chart-wrap canvas {
+  max-width: 100%;
+  height: auto !important;
+}
+
+/* Income Sources Chart (larger for prominence) */
+.income-sources-chart {
+  max-width: 500px;
+  margin: 32px auto;
+}
+
+.income-sources-chart canvas {
+  max-width: 100%;
+  height: auto !important;
+}
+
