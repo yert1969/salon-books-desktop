@@ -1218,6 +1218,33 @@ async function renderEntriesView() {
     
     <div class="card" style="max-width:800px; margin:0 auto;">
       <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Transactions</h3>
+      
+      <div style="margin-bottom:20px;">
+        <input type="text" id="transaction-search" class="form-input" placeholder="Search by category or notes..." 
+          style="width:100%; padding:10px; font-size:14px; margin-bottom:10px;"
+          oninput="filterTransactions()">
+        
+        <div style="display:flex; gap:12px; margin-bottom:10px;">
+          <select id="filter-type" class="form-select" style="flex:1; padding:10px; font-size:14px;" onchange="filterTransactions()">
+            <option value="all">All Types</option>
+            <option value="INCOME">Income Only</option>
+            <option value="EXPENSE">Expenses Only</option>
+          </select>
+          
+          <select id="filter-category" class="form-select" style="flex:1; padding:10px; font-size:14px;" onchange="filterTransactions()">
+            <option value="all">All Categories</option>
+          </select>
+        </div>
+        
+        <div style="display:flex; gap:12px; align-items:center;">
+          <input type="text" id="filter-amount" class="form-input" placeholder="Amount: 50 or >50 or <50 or 50-100" 
+            style="flex:1; padding:10px; font-size:14px;"
+            oninput="filterTransactions()">
+          
+          <button onclick="clearFilters()" class="btn-secondary" style="padding:10px 20px; font-size:14px;">Clear Filters</button>
+        </div>
+      </div>
+      
       <div id="recent-transactions"></div>
       <div id="load-more-container"></div>
     </div>
@@ -1230,7 +1257,39 @@ async function renderEntriesView() {
     state.transactionsToShow = 30;
   }
   
+  // Populate category filter
+  populateCategoryFilter();
+  
   await renderRecentTransactions();
+}
+
+function populateCategoryFilter() {
+  const filterCategory = document.getElementById('filter-category');
+  if (!filterCategory) return;
+  
+  // Get all unique categories from both income and expense
+  const allCategories = [
+    ...(state.categories.INCOME || []),
+    ...(state.categories.EXPENSE || [])
+  ];
+  const uniqueCategories = [...new Set(allCategories)].sort();
+  
+  filterCategory.innerHTML = '<option value="all">All Categories</option>' + 
+    uniqueCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+}
+
+function clearFilters() {
+  document.getElementById('transaction-search').value = '';
+  document.getElementById('filter-type').value = 'all';
+  document.getElementById('filter-category').value = 'all';
+  document.getElementById('filter-amount').value = '';
+  state.transactionsToShow = 30; // Reset pagination
+  filterTransactions();
+}
+
+function filterTransactions() {
+  state.transactionsToShow = 30; // Reset to first page when filtering
+  renderRecentTransactions();
 }
 
 async function renderRecentTransactions() {
@@ -1238,12 +1297,91 @@ async function renderRecentTransactions() {
   const loadMoreContainer = document.getElementById('load-more-container');
   if (!container) return;
   
+  // Get filter values
+  const searchText = document.getElementById('transaction-search')?.value.toLowerCase() || '';
+  const filterType = document.getElementById('filter-type')?.value || 'all';
+  const filterCategory = document.getElementById('filter-category')?.value || 'all';
+  const filterAmount = document.getElementById('filter-amount')?.value.trim() || '';
+  
+  // Parse amount filter
+  let amountFilter = null;
+  if (filterAmount) {
+    if (filterAmount.includes('-')) {
+      // Range: 50-100
+      const parts = filterAmount.split('-').map(p => parseFloat(p.trim()));
+      if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        amountFilter = { type: 'range', min: parts[0], max: parts[1] };
+      }
+    } else if (filterAmount.startsWith('>=')) {
+      const val = parseFloat(filterAmount.substring(2).trim());
+      if (!isNaN(val)) amountFilter = { type: 'gte', value: val };
+    } else if (filterAmount.startsWith('<=')) {
+      const val = parseFloat(filterAmount.substring(2).trim());
+      if (!isNaN(val)) amountFilter = { type: 'lte', value: val };
+    } else if (filterAmount.startsWith('>')) {
+      const val = parseFloat(filterAmount.substring(1).trim());
+      if (!isNaN(val)) amountFilter = { type: 'gt', value: val };
+    } else if (filterAmount.startsWith('<')) {
+      const val = parseFloat(filterAmount.substring(1).trim());
+      if (!isNaN(val)) amountFilter = { type: 'lt', value: val };
+    } else {
+      // Exact match
+      const val = parseFloat(filterAmount);
+      if (!isNaN(val)) amountFilter = { type: 'exact', value: val };
+    }
+  }
+  
   // Get all transactions sorted by creation time (newest first)
-  const allTransactions = await db.transactions.toArray();
+  let allTransactions = await db.transactions.toArray();
   allTransactions.sort((a, b) => {
     const aTime = a.createdAt?.toDate?.() || new Date(0);
     const bTime = b.createdAt?.toDate?.() || new Date(0);
     return bTime - aTime;
+  });
+  
+  // Apply filters
+  allTransactions = allTransactions.filter(t => {
+    // Type filter
+    if (filterType !== 'all' && t.type !== filterType) return false;
+    
+    // Category filter
+    if (filterCategory !== 'all' && t.category !== filterCategory) return false;
+    
+    // Search filter (search in category and notes)
+    if (searchText) {
+      const categoryMatch = t.category?.toLowerCase().includes(searchText);
+      const notesMatch = t.notes?.toLowerCase().includes(searchText);
+      if (!categoryMatch && !notesMatch) return false;
+    }
+    
+    // Amount filter
+    if (amountFilter) {
+      const isIncome = t.type === 'INCOME';
+      const amount = isIncome ? (t.serviceAmount || 0) + (t.tipAmount || 0) : (t.amount || 0);
+      
+      switch (amountFilter.type) {
+        case 'exact':
+          if (Math.abs(amount - amountFilter.value) > 0.01) return false;
+          break;
+        case 'gt':
+          if (amount <= amountFilter.value) return false;
+          break;
+        case 'gte':
+          if (amount < amountFilter.value) return false;
+          break;
+        case 'lt':
+          if (amount >= amountFilter.value) return false;
+          break;
+        case 'lte':
+          if (amount > amountFilter.value) return false;
+          break;
+        case 'range':
+          if (amount < amountFilter.min || amount > amountFilter.max) return false;
+          break;
+      }
+    }
+    
+    return true;
   });
   
   const toShow = state.transactionsToShow || 30;
@@ -1253,7 +1391,7 @@ async function renderRecentTransactions() {
   if (recentTransactions.length === 0) {
     container.innerHTML = `
       <div style="text-align:center; padding:40px 20px; color:var(--text-muted);">
-        No transactions yet
+        ${searchText || filterType !== 'all' || filterCategory !== 'all' || filterAmount ? 'No matching transactions' : 'No transactions yet'}
       </div>
     `;
     if (loadMoreContainer) loadMoreContainer.innerHTML = '';
@@ -1321,12 +1459,14 @@ async function renderRecentTransactions() {
           Load More (${allTransactions.length - toShow} older)
         </button>
       `;
-    } else {
+    } else if (recentTransactions.length > 0) {
       loadMoreContainer.innerHTML = `
         <div style="text-align:center; padding:20px; color:var(--text-muted); font-size:14px;">
-          All transactions loaded
+          ${allTransactions.length} ${allTransactions.length === 1 ? 'transaction' : 'transactions'} shown
         </div>
       `;
+    } else {
+      loadMoreContainer.innerHTML = '';
     }
   }
 }
