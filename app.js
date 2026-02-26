@@ -2069,7 +2069,7 @@ function showEditBanner() {
   banner.innerHTML = '✎ EDITING TRANSACTION';
   
   // Insert at top of app content
-  const appContent = document.getElementById('app-content');
+  const appContent = document.getElementById('content');
   if (appContent && appContent.firstChild) {
     appContent.insertBefore(banner, appContent.firstChild);
   }
@@ -2724,8 +2724,7 @@ async function deleteMonthlyExpenseEntry(id) {
 }
 
 async function renderDailyView() {
-  const content = document.getElementById('app-content');
-  const hdr = document.getElementById('header-actions');
+  const content = document.getElementById('content');
   hdr.innerHTML = '';
 
   const txns    = await db.transactions.where('date').equals(state.selectedDate).toArray();
@@ -3226,8 +3225,7 @@ async function saveDaySummary() {
 // ----------------------------------------------------------------
 
 async function renderMonthlyView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = '';
+  const content = document.getElementById('content');
 
   const allExpenses = await db.monthlyExpenses.toArray();
   const expenses = allExpenses.filter(
@@ -3522,8 +3520,7 @@ async function updateMonthlyExpense(id) {
 // ----------------------------------------------------------------
 
 async function renderReportsView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = '';
+  const content = document.getElementById('content');
 
   const reportTypes = [
     { id: 'daily',    label: 'Daily' },
@@ -5293,14 +5290,7 @@ function getRentStatus(weekStart, datePaid) {
 }
 
 async function renderRentersView() {
-  const content = document.getElementById('app-content');
-  document.getElementById('header-actions').innerHTML = `
-    <button class="header-icon-btn" onclick="openAddRenterModal()" title="Add Renter">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-      </svg>
-    </button>`;
-
+  const content = document.getElementById('content');
   if (!state.rentersWeekStart) {
     state.rentersWeekStart = getWeekStart(todayStr());
   }
