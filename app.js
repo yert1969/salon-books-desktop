@@ -35,6 +35,17 @@ db.version(2).stores({
   categories: 'id, userId, type'
 });
 
+// Version 3: Add settings table and status index on renters
+db.version(3).stores({
+  transactions: 'id, userId, date, type, category',
+  monthlyExpenses: 'id, userId, year, month, category',
+  renters: 'id, userId, name, status',
+  rentPayments: 'id, userId, datePaid, weekStart, renterId',
+  dailySummary: 'id, userId, date',
+  categories: 'id, userId, type',
+  settings: 'key'
+});
+
 // Global State
 let currentUser = null;
 let state = {
@@ -144,6 +155,11 @@ function monthName(m) {
 function monthNameShort(m) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return months[m - 1] || '';
+}
+
+function formatDateShort(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
 function showToast(msg) {
