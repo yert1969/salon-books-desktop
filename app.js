@@ -1216,37 +1216,26 @@ async function renderEntriesView() {
       </button>
     </div>
     
-    <div class="card" style="max-width:800px; margin:0 auto 24px auto;">
-      <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Recent Transactions</h3>
+    <div class="card" style="max-width:800px; margin:0 auto;">
+      <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Transactions</h3>
       <div id="recent-transactions"></div>
-    </div>
-    
-    <div class="card">
-      <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Browse All Entries</h3>
-      
-      <div style="display:flex; gap:8px; margin-bottom:20px; border-bottom:2px solid var(--border);">
-        <button class="view-tab ${viewMode === 'daily' ? 'active' : ''}" onclick="switchEntriesView('daily')" style="padding:10px 20px; background:none; border:none; border-bottom:3px solid ${viewMode === 'daily' ? 'var(--plum)' : 'transparent'}; cursor:pointer; font-size:14px; font-weight:${viewMode === 'daily' ? '600' : '500'}; color:${viewMode === 'daily' ? 'var(--plum)' : 'var(--text-light)'}; margin-bottom:-2px;">
-          Daily Entries
-        </button>
-        <button class="view-tab ${viewMode === 'monthly' ? 'active' : ''}" onclick="switchEntriesView('monthly')" style="padding:10px 20px; background:none; border:none; border-bottom:3px solid ${viewMode === 'monthly' ? 'var(--plum)' : 'transparent'}; cursor:pointer; font-size:14px; font-weight:${viewMode === 'monthly' ? '600' : '500'}; color:${viewMode === 'monthly' ? 'var(--plum)' : 'var(--text-light)'}; margin-bottom:-2px;">
-          Monthly Entries
-        </button>
-        <button class="view-tab ${viewMode === 'all' ? 'active' : ''}" onclick="switchEntriesView('all')" style="padding:10px 20px; background:none; border:none; border-bottom:3px solid ${viewMode === 'all' ? 'var(--plum)' : 'transparent'}; cursor:pointer; font-size:14px; font-weight:${viewMode === 'all' ? '600' : '500'}; color:${viewMode === 'all' ? 'var(--plum)' : 'var(--text-light)'}; margin-bottom:-2px;">
-          All Entries
-        </button>
-      </div>
-      
-      <div id="entries-content"></div>
+      <div id="load-more-container"></div>
     </div>
   `;
   
   updateEntryForm();
+  
+  // Initialize showing first 30 transactions
+  if (!state.transactionsToShow) {
+    state.transactionsToShow = 30;
+  }
+  
   await renderRecentTransactions();
-  await renderEntriesContent();
 }
 
 async function renderRecentTransactions() {
   const container = document.getElementById('recent-transactions');
+  const loadMoreContainer = document.getElementById('load-more-container');
   if (!container) return;
   
   // Get all transactions sorted by creation time (newest first)
@@ -1257,15 +1246,17 @@ async function renderRecentTransactions() {
     return bTime - aTime;
   });
   
-  // Take the most recent 15
-  const recentTransactions = allTransactions.slice(0, 15);
+  const toShow = state.transactionsToShow || 30;
+  const recentTransactions = allTransactions.slice(0, toShow);
+  const hasMore = allTransactions.length > toShow;
   
   if (recentTransactions.length === 0) {
     container.innerHTML = `
       <div style="text-align:center; padding:40px 20px; color:var(--text-muted);">
-        No recent transactions
+        No transactions yet
       </div>
     `;
+    if (loadMoreContainer) loadMoreContainer.innerHTML = '';
     return;
   }
   
@@ -1321,6 +1312,28 @@ async function renderRecentTransactions() {
       </div>
     `;
   }).join('');
+  
+  // Show "Load More" button if there are more transactions
+  if (loadMoreContainer) {
+    if (hasMore) {
+      loadMoreContainer.innerHTML = `
+        <button class="btn-secondary" onclick="loadMoreTransactions()" style="width:100%; margin-top:20px; padding:12px;">
+          Load More (${allTransactions.length - toShow} older)
+        </button>
+      `;
+    } else {
+      loadMoreContainer.innerHTML = `
+        <div style="text-align:center; padding:20px; color:var(--text-muted); font-size:14px;">
+          All transactions loaded
+        </div>
+      `;
+    }
+  }
+}
+
+function loadMoreTransactions() {
+  state.transactionsToShow = (state.transactionsToShow || 30) + 30;
+  renderRecentTransactions();
 }
 
 function updateEntryForm() {
