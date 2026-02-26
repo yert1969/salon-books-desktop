@@ -3539,7 +3539,6 @@ async function renderReportsView() {
   const content = document.getElementById('content');
 
   const reportTypes = [
-    { id: 'daily',    label: 'Daily' },
     { id: 'weekly',   label: 'Weekly' },
     { id: 'monthly',  label: 'Monthly' },
     { id: 'month-compare', label: 'Month Compare' },
@@ -3547,18 +3546,22 @@ async function renderReportsView() {
     { id: 'annual',   label: 'Annual' },
     { id: 'yoy',      label: 'Year vs Year' },
     { id: 'category', label: 'By Category' },
-    { id: 'export',   label: '📥 Export CSV' },
+    { id: 'export',   label: '📥 Export' },
   ];
 
   const tabs = reportTypes.map(r =>
-    `<button class="tab-btn ${state.reportType === r.id ? 'active' : ''}"
+    `<button class="report-tab ${state.reportType === r.id ? 'active' : ''}"
       onclick="state.reportType='${r.id}'; renderReportsView()">
       ${r.label}
     </button>`
   ).join('');
 
   content.innerHTML = `
-    <div class="report-type-tabs">${tabs}</div>
+    <div class="page-header">
+      <h2 class="page-title">Reports</h2>
+      <p class="page-subtitle">Analyze your salon performance</p>
+    </div>
+    <div class="report-selector">${tabs}</div>
     <div id="report-inner"></div>
   `;
 
@@ -3589,16 +3592,7 @@ async function renderReportInner() {
     }
 
     case 'weekly': {
-      el.innerHTML = `
-        <div class="report-controls" style="display:flex; gap:8px; align-items:center;">
-          <button class="report-btn" onclick="navigateWeek(-1)" style="padding:8px 12px;">◄</button>
-          <input type="date" class="report-input" id="r-week-date" value="${state.selectedDate}"
-            placeholder="Week starting (Monday)" style="flex:1;">
-          <button class="report-btn" onclick="navigateWeek(1)" style="padding:8px 12px;">►</button>
-          <button class="report-btn" onclick="runWeeklyReport()">View</button>
-        </div>
-        <div class="report-body" id="report-output"></div>
-      `;
+      el.innerHTML = `<div class="report-body" id="report-output"></div>`;
       await runWeeklyReport();
       break;
     }
@@ -4049,33 +4043,63 @@ async function runWeeklyReport() {
   }
 
   document.getElementById('report-output').innerHTML = `
-    <div class="report-section-title">Week of ${formatDateShort(weekStart)}</div>
-    <div class="report-stat-grid">
-      <div class="report-stat"><div class="report-stat-label">Total Income</div><div class="report-stat-value green">${fmt(weeklyIncome)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Tips</div><div class="report-stat-value gold">${fmt(weeklyTips)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Expenses</div><div class="report-stat-value red">${fmt(weeklyExp)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Net</div><div class="report-stat-value plum">${fmt(weeklyIncome+weeklyTips-weeklyExp)}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Clients</div><div class="report-stat-value">${weeklyClients}</div></div>
-      <div class="report-stat"><div class="report-stat-label">Avg/Client</div><div class="report-stat-value">${weeklyClients>0?fmt((weeklyIncome+weeklyTips)/weeklyClients):'—'}</div></div>
+    <!-- Date Navigation -->
+    <div class="daily-date-bar">
+      <button class="date-nav-btn" onclick="navigateWeek(-1)">←  Prev Week</button>
+      <div class="current-date">${formatWeekRange(weekStart)}</div>
+      <button class="date-nav-btn" onclick="navigateWeek(1)">Next Week →</button>
     </div>
+
+    <!-- Summary Metrics -->
+    <div class="report-grid">
+      <div class="stat-card" style="background:linear-gradient(135deg, #2D7A4C 0%, #1F5A35 100%);">
+        <div class="stat-label">WEEK INCOME</div>
+        <div class="stat-value">${fmt(weeklyIncome + weeklyTips)}</div>
+        <div class="stat-change">${weeklyClients} clients total</div>
+      </div>
+      <div class="stat-card" style="background:linear-gradient(135deg, #C13838 0%, #8B2626 100%);">
+        <div class="stat-label">WEEK EXPENSES</div>
+        <div class="stat-value">${fmt(weeklyExp)}</div>
+        <div class="stat-change">Operating costs</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">WEEK NET</div>
+        <div class="stat-value">${fmt(weeklyIncome + weeklyTips - weeklyExp)}</div>
+        <div class="stat-change">Profit/Loss</div>
+      </div>
+    </div>
+
     ${comparisonHTML}
+
     ${rows.length > 0 ? `
-    <div class="report-white-card">
-      <div class="report-section-title">Daily Breakdown</div>
-      ${rows.map(r=>`
-        <div class="report-row">
-          <div>
-            <div class="report-row-label">${formatDateShort(r.d)}</div>
-            <div class="report-row-sub">${r.cls} clients</div>
-          </div>
-          <div style="text-align:right">
-            <div class="report-row-value income">+${fmt(r.inc+r.tips)}</div>
-            <div style="font-size:12px; color:var(--danger)">-${fmt(r.exp)}</div>
-          </div>
-        </div>
-      `).join('')}
-    </div>
-    ` : '<p style="color:var(--text-muted);text-align:center;padding:30px 0;">No data for this week.</p>'}
+      <!-- Daily Breakdown Table -->
+      <div class="report-section">
+        <div class="report-section-title">Daily Breakdown</div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>DAY</th>
+              <th style="text-align:right;">INCOME</th>
+              <th style="text-align:right;">EXPENSES</th>
+              <th style="text-align:right;">NET</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => {
+              const dateStr = formatDateShort(r.d);
+              return `
+                <tr>
+                  <td><strong>${dateStr}</strong></td>
+                  <td style="text-align:right; color:var(--success); font-weight:600;">${fmt(r.inc + r.tips)}</td>
+                  <td style="text-align:right; color:var(--danger); font-weight:600;">${fmt(r.exp)}</td>
+                  <td style="text-align:right; color:var(--plum); font-weight:700;">${fmt(r.net)}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    ` : '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-title">No Data</div><div class="empty-state-description">No transactions for this week</div></div>'}
   `;
 }
 
@@ -4971,45 +4995,50 @@ async function renderSettingsView() {
   }
 
   content.innerHTML = `
-    <!-- Business Name -->
-    <div class="settings-section">
-      <div class="settings-label">Business</div>
-      <div class="card" style="margin-bottom: 8px;">
-        <label class="form-label" style="margin-bottom:8px;">Business Name</label>
-        <input type="text" class="business-name-input" id="biz-name"
-          placeholder="e.g. Annette's Salon"
-          value="${bizName ? bizName.value : ''}">
-        <button class="btn-add-chip" style="width:100%;margin-top:10px;" onclick="saveBusinessName()">Save Name</button>
-      </div>
+    <div class="page-header">
+      <h2 class="page-title">Settings</h2>
+      <p class="page-subtitle">Manage categories and preferences</p>
     </div>
 
     <!-- Categories -->
     <div class="settings-section">
       <div class="settings-label">Income Categories</div>
-      <div class="card" style="margin-bottom: 8px;">
+      <div class="card">
         <div id="income-cats"></div>
-        <div class="add-category-row">
-          <input type="text" class="add-category-input" id="new-income-cat" placeholder="Add category…">
-          <button class="btn-add-chip" onclick="addCategory('INCOME')">+ Add</button>
+        <div class="add-category-row" style="margin-top:16px;">
+          <input type="text" class="add-category-input" id="new-income-cat" placeholder="New category name">
+          <button class="btn-add-chip" onclick="addCategory('INCOME')">Add</button>
         </div>
       </div>
     </div>
 
     <div class="settings-section">
-      <div class="settings-label">Expense Categories</div>
-      <div class="card" style="margin-bottom: 8px;">
+      <div class="settings-label">Expense Categories (13 total)</div>
+      <div class="card">
         <div id="all-exp-cats"></div>
-        <div class="add-category-row">
-          <input type="text" class="add-category-input" id="new-exp-cat" placeholder="Add category…">
-          <button class="btn-add-chip" onclick="addCategory('EXPENSE')">+ Add</button>
+        <div class="add-category-row" style="margin-top:16px;">
+          <input type="text" class="add-category-input" id="new-exp-cat" placeholder="New category name">
+          <button class="btn-add-chip" onclick="addCategory('EXPENSE')">Add</button>
         </div>
+        <div style="color:var(--text-muted);font-size:12px;margin-top:12px;">All expense categories (used for both daily and monthly expenses)</div>
       </div>
     </div>
 
-    <!-- Features -->
+    <!-- Backup & Restore -->
     <div class="settings-section">
-      <div class="settings-label">Features</div>
-      <div class="settings-item">
+      <div class="settings-label">Restore from Backup</div>
+      <div class="card" style="text-align:center;padding:40px;">
+        <div style="font-size:64px;margin-bottom:16px;">💾</div>
+        <h3 style="font-size:16px;font-weight:600;margin-bottom:8px;">Restore from Backup CSV</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:24px;">Upload a CSV file exported from Reports → Export</p>
+        <button class="btn-primary" style="padding:12px 32px;" onclick="triggerRestoreFilePicker()">Choose File</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Import Historical Data</div>
+      <div class="card" style="padding:24px;">
+        <p style="font-size:14px;color:var(--text);margin-bottom:20px;">Import transactions from your historical data CSV file (Vagaro/Square format). This will add past transactions to your database.</p>
         <div>
           <div class="settings-item-label">Show Booth Renters Tab</div>
           <div class="settings-item-sub">${rentersStatus}</div>
@@ -5119,11 +5148,16 @@ function loadCategoryChips() {
   const incomeEl = document.getElementById('income-cats');
   if (incomeEl) {
     const sortedIncome = [...(state.categories.INCOME || [])].sort();
-    incomeEl.innerHTML = sortedIncome.map(name =>
-      `<span class="category-chip">${name}
-        <button class="chip-delete" onclick="deleteCategory('INCOME','${name.replace(/'/g,"\\'")}')">×</button>
-      </span>`
-    ).join('');
+    if (sortedIncome.length > 0) {
+      incomeEl.innerHTML = '<div class="category-chip-list">' +
+        sortedIncome.map(name =>
+          `<span class="category-chip">${name}
+            <button class="chip-remove-btn" onclick="deleteCategory('INCOME','${name.replace(/'/g,"\\'")}')">×</button>
+          </span>`
+        ).join('') + '</div>';
+    } else {
+      incomeEl.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:12px;">No categories yet</div>';
+    }
   }
   
   // Unified expense categories - sorted alphabetically
@@ -5131,11 +5165,16 @@ function loadCategoryChips() {
   if (expenseEl) {
     const sortedExpenses = [...(state.categories.EXPENSE || [])].sort();
     
-    expenseEl.innerHTML = sortedExpenses.map(name => {
-      return `<span class="category-chip">${name}
-        <button class="chip-delete" onclick="deleteCategory('EXPENSE','${name.replace(/'/g,"\\'")}')">×</button>
-      </span>`;
-    }).join('');
+    if (sortedExpenses.length > 0) {
+      expenseEl.innerHTML = '<div class="category-chip-list">' +
+        sortedExpenses.map(name => {
+          return `<span class="category-chip">${name}
+            <button class="chip-remove-btn" onclick="deleteCategory('EXPENSE','${name.replace(/'/g,"\\'")}')">×</button>
+          </span>`;
+        }).join('') + '</div>';
+    } else {
+      expenseEl.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:12px;">No categories yet</div>';
+    }
   }
 }
 
