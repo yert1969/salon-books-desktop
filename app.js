@@ -457,6 +457,7 @@ async function navigate(view) {
   try {
     switch(view) {
       case 'entries': await renderEntriesView(); break;
+      case 'insights': await renderInsightsView(); break;
       case 'renters': await renderRentersView(); break;
       case 'reports': await renderReportsView(); break;
       case 'settings': await renderSettingsView(); break;
@@ -1117,11 +1118,351 @@ async function deleteMonthlyExpense(id) {
 
 
 // ============================================================
+// INSIGHTS VIEW - Smart automatic insights from data
+// ============================================================
+
+async function renderInsightsView() {
+  const content = document.getElementById('content');
+  
+  content.innerHTML = `
+    <div class="page-header">
+      <h2 class="page-title">💡 Insights</h2>
+      <p class="page-subtitle">Automatic analysis of your business data</p>
+    </div>
+    
+    <div id="insights-loading" style="text-align:center; padding:60px; color:var(--text-muted); font-size:16px;">
+      Analyzing your data...
+    </div>
+    <div id="insights-content" style="max-width:1200px; margin:0 auto; display:grid; grid-template-columns:repeat(auto-fit, minmax(350px, 1fr)); gap:20px;"></div>
+  `;
+  
+  // Calculate and render insights
+  await calculateAndRenderInsights();
+}
+
+async function calculateAndRenderInsights() {
+  const container = document.getElementById('insights-content');
+  const loader = document.getElementById('insights-loading');
+  
+  try {
+    // Get all transactions
+    const allTransactions = await db.transactions.toArray();
+    const allSummaries = await db.dailySummary.toArray();
+    
+    if (allTransactions.length === 0) {
+      container.innerHTML = `
+        <div style="text-align:center; padding:60px; color:var(--text-muted); grid-column:1/-1;">
+          <div style="font-size:64px; margin-bottom:20px;">📊</div>
+          <p style="font-size:18px;">Start adding transactions to see insights!</p>
+        </div>
+      `;
+      loader.style.display = 'none';
+      return;
+    }
+    
+    const insights = [];
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1;
+    const currentYear = today.getFullYear();
+    
+    // Helper functions
+    const getDayName = (dateStr) => {
+      const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const date = new Date(dateStr + 'T00:00:00');
+      return days[date.getDay()];
+    };
+    
+    const fmt = (num) => `$${num.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+    
+    // 1. BEST DAY OF WEEK
+    const dayTotals = {};
+    allTransactions.filter(t => t.type === 'INCOME').forEach(t => {
+      const dayName = getDayName(t.date);
+      if (!dayTotals[dayName]) dayTotals[dayName] = {total: 0, count: 0};
+      dayTotals[dayName].total += (t.serviceAmount || 0) + (t.tipAmount || 0);
+      dayTotals[dayName].count++;
+    });
+    
+    let bestDay = null;
+    let bestDayAvg = 0;
+    Object.keys(dayTotals).forEach(day => {
+      const avg = dayTotals[day].total / dayTotals[day].count;
+      if (avg > bestDayAvg) {
+        bestDay = day;
+        bestDayAvg = avg;
+      }
+    });
+    
+    if (bestDay) {
+      insights.push({
+        icon: '📅',
+        title: 'Best Day of Week',
+        value: bestDay,
+        subtitle: `Averages ${fmt(bestDayAvg)} in income`,
+        color: 'var(--success)'
+      });
+    }
+    
+    // 2. THIS MONTH VS LAST MONTH
+    const thisMonthTxns = allTransactions.filter(t => {
+      const [y, m] = t.date.split('-');
+      return parseInt(y) === currentYear && parseInt(m) === currentMonth;
+    });
+    
+    const lastMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+    const lastMonthYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+    const lastMonthTxns = allTransactions.filter(t => {
+      const [y, m] = t.date.split('-');
+      return parseInt(y) === lastMonthYear && parseInt(m) === lastMonth;
+    });
+    
+    const thisMonthIncome = thisMonthTxns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    const lastMonthIncome = lastMonthTxns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    if (lastMonthIncome > 0) {
+      const change = ((thisMonthIncome - lastMonthIncome) / lastMonthIncome) * 100;
+      const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
+      const color = change > 0 ? 'var(--success)' : change < 0 ? 'var(--danger)' : 'var(--text-muted)';
+      
+      insights.push({
+        icon: '📈',
+        title: 'This Month vs Last',
+        value: `${arrow} ${Math.abs(change).toFixed(0)}%`,
+        subtitle: `${fmt(thisMonthIncome)} vs ${fmt(lastMonthIncome)}`,
+        color: color
+      });
+    }
+    
+    // 3. AVERAGE TIP PERCENTAGE
+    const incomeTxns = allTransactions.filter(t => t.type === 'INCOME' && (t.serviceAmount || 0) > 0);
+    if (incomeTxns.length > 0) {
+      const totalService = incomeTxns.reduce((s, t) => s + (t.serviceAmount || 0), 0);
+      const totalTips = incomeTxns.reduce((s, t) => s + (t.tipAmount || 0), 0);
+      const avgTipPct = (totalTips / totalService) * 100;
+      
+      insights.push({
+        icon: '💰',
+        title: 'Average Tip Rate',
+        value: `${avgTipPct.toFixed(1)}%`,
+        subtitle: `${fmt(totalTips)} in total tips`,
+        color: 'var(--gold)'
+      });
+    }
+    
+    // 4. TOP 3 SERVICES BY REVENUE
+    const serviceRevenue = {};
+    allTransactions.filter(t => t.type === 'INCOME').forEach(t => {
+      if (!serviceRevenue[t.category]) serviceRevenue[t.category] = 0;
+      serviceRevenue[t.category] += (t.serviceAmount || 0) + (t.tipAmount || 0);
+    });
+    
+    const topServices = Object.entries(serviceRevenue)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+    
+    if (topServices.length > 0) {
+      insights.push({
+        icon: '🏆',
+        title: 'Top Services',
+        value: topServices.map((s, i) => `${i + 1}. ${s[0]}`).join('\n'),
+        subtitle: topServices.map(s => fmt(s[1])).join(' | '),
+        color: 'var(--plum)',
+        multiline: true
+      });
+    }
+    
+    // 5. BUSIEST DAY (by client count)
+    const clientsByDay = {};
+    allSummaries.forEach(s => {
+      const dayName = getDayName(s.date);
+      if (!clientsByDay[dayName]) clientsByDay[dayName] = {total: 0, count: 0};
+      clientsByDay[dayName].total += s.clientsSeen || 0;
+      clientsByDay[dayName].count++;
+    });
+    
+    let busiestDay = null;
+    let busiestAvg = 0;
+    Object.keys(clientsByDay).forEach(day => {
+      const avg = clientsByDay[day].total / clientsByDay[day].count;
+      if (avg > busiestAvg) {
+        busiestDay = day;
+        busiestAvg = avg;
+      }
+    });
+    
+    if (busiestDay) {
+      insights.push({
+        icon: '👥',
+        title: 'Busiest Day',
+        value: busiestDay,
+        subtitle: `Avg ${busiestAvg.toFixed(1)} clients`,
+        color: 'var(--plum)'
+      });
+    }
+    
+    // 6. PROFIT MARGIN THIS MONTH
+    const thisMonthExpenses = thisMonthTxns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    if (thisMonthIncome > 0) {
+      const profit = thisMonthIncome - thisMonthExpenses;
+      const margin = (profit / thisMonthIncome) * 100;
+      
+      insights.push({
+        icon: '💵',
+        title: 'Profit Margin (This Month)',
+        value: `${margin.toFixed(0)}%`,
+        subtitle: `${fmt(profit)} profit`,
+        color: margin > 50 ? 'var(--success)' : margin > 30 ? 'var(--gold)' : 'var(--text)'
+      });
+    }
+    
+    // 7. SERVICE TRENDING UP
+    const last30Days = allTransactions.filter(t => {
+      const txDate = new Date(t.date);
+      const daysAgo = (today - txDate) / (1000 * 60 * 60 * 24);
+      return daysAgo <= 30;
+    });
+    
+    const prev30Days = allTransactions.filter(t => {
+      const txDate = new Date(t.date);
+      const daysAgo = (today - txDate) / (1000 * 60 * 60 * 24);
+      return daysAgo > 30 && daysAgo <= 60;
+    });
+    
+    const recentByService = {};
+    const prevByService = {};
+    
+    last30Days.filter(t => t.type === 'INCOME').forEach(t => {
+      recentByService[t.category] = (recentByService[t.category] || 0) + 1;
+    });
+    
+    prev30Days.filter(t => t.type === 'INCOME').forEach(t => {
+      prevByService[t.category] = (prevByService[t.category] || 0) + 1;
+    });
+    
+    let trendingService = null;
+    let trendingGrowth = 0;
+    
+    Object.keys(recentByService).forEach(service => {
+      const recent = recentByService[service];
+      const prev = prevByService[service] || 0;
+      if (prev > 0) {
+        const growth = ((recent - prev) / prev) * 100;
+        if (growth > trendingGrowth) {
+          trendingService = service;
+          trendingGrowth = growth;
+        }
+      }
+    });
+    
+    if (trendingService && trendingGrowth > 10) {
+      insights.push({
+        icon: '📊',
+        title: 'Trending Service',
+        value: trendingService,
+        subtitle: `Up ${trendingGrowth.toFixed(0)}% last 30 days`,
+        color: 'var(--success)'
+      });
+    }
+    
+    // 8. AVERAGE PER CLIENT
+    const totalClients = allSummaries.reduce((s, d) => s + (d.clientsSeen || 0), 0);
+    const totalIncome = allTransactions.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    if (totalClients > 0) {
+      const avgPerClient = totalIncome / totalClients;
+      
+      insights.push({
+        icon: '💳',
+        title: 'Avg Per Client',
+        value: fmt(avgPerClient),
+        subtitle: `Based on ${totalClients} total clients`,
+        color: 'var(--plum)'
+      });
+    }
+    
+    // 9. THIS WEEK VS LAST WEEK
+    const getWeekStart = (date) => {
+      const d = new Date(date);
+      const day = d.getDay();
+      const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+      return new Date(d.setDate(diff)).toISOString().split('T')[0];
+    };
+    
+    const todayStr = today.toISOString().split('T')[0];
+    const thisWeekStart = getWeekStart(todayStr);
+    const lastWeekStart = addDays(thisWeekStart, -7);
+    
+    const thisWeekIncome = allTransactions.filter(t => {
+      return t.type === 'INCOME' && t.date >= thisWeekStart && t.date < addDays(thisWeekStart, 7);
+    }).reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    const lastWeekIncome = allTransactions.filter(t => {
+      return t.type === 'INCOME' && t.date >= lastWeekStart && t.date < thisWeekStart;
+    }).reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    if (lastWeekIncome > 0) {
+      const weekChange = ((thisWeekIncome - lastWeekIncome) / lastWeekIncome) * 100;
+      const arrow = weekChange > 0 ? '↑' : weekChange < 0 ? '↓' : '→';
+      const color = weekChange > 0 ? 'var(--success)' : weekChange < 0 ? 'var(--danger)' : 'var(--text-muted)';
+      
+      insights.push({
+        icon: '📆',
+        title: 'This Week vs Last',
+        value: `${arrow} ${Math.abs(weekChange).toFixed(0)}%`,
+        subtitle: `${fmt(thisWeekIncome)} vs ${fmt(lastWeekIncome)}`,
+        color: color
+      });
+    }
+    
+    // 10. EXPENSE ALERT
+    const avgMonthlyExpense = allTransactions.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0) / 12;
+    
+    if (thisMonthExpenses > avgMonthlyExpense * 1.3) {
+      insights.push({
+        icon: '⚠️',
+        title: 'Expense Alert',
+        value: 'Higher Than Usual',
+        subtitle: `${fmt(thisMonthExpenses)} vs ${fmt(avgMonthlyExpense)} avg`,
+        color: 'var(--danger)'
+      });
+    }
+    
+    // Render all insights
+    container.innerHTML = insights.map(insight => `
+      <div class="card" style="border-left:4px solid ${insight.color};">
+        <div style="display:flex; align-items:start; gap:16px;">
+          <div style="font-size:48px; line-height:1;">${insight.icon}</div>
+          <div style="flex:1;">
+            <div style="font-size:13px; color:var(--text-muted); font-weight:600; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">${insight.title}</div>
+            <div style="font-size:${insight.multiline ? '16px' : '28px'}; font-weight:700; color:${insight.color}; margin-bottom:6px; ${insight.multiline ? 'white-space:pre-line;' : ''}">${insight.value}</div>
+            <div style="font-size:14px; color:var(--text-muted);">${insight.subtitle}</div>
+          </div>
+        </div>
+      </div>
+    `).join('');
+    
+    loader.style.display = 'none';
+    
+  } catch (error) {
+    console.error('Error calculating insights:', error);
+    container.innerHTML = `
+      <div style="text-align:center; padding:60px; color:var(--danger); grid-column:1/-1;">
+        <p style="font-size:18px;">Error calculating insights. Please try again.</p>
+      </div>
+    `;
+    loader.style.display = 'none';
+  }
+}
+
+// ============================================================
 // ENTRIES VIEW (Unified Income/Expense Entry)
 // ============================================================
 
 async function renderEntriesView() {
   const content = document.getElementById('content');
+  
+  // Check if we're in edit mode
+  const isEditing = !!state.editingTransactionId;
   
   // Get current view mode from state
   const viewMode = state.entriesViewMode || 'daily';
@@ -1132,7 +1473,7 @@ async function renderEntriesView() {
       <p class="page-subtitle">Add and manage all transactions</p>
     </div>
     
-    <div class="card" style="max-width:600px; margin:0 auto 24px auto;">
+    <div class="card" style="max-width:600px; margin:0 auto ${isEditing ? '' : '24px auto'};">
       <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Add Transaction</h3>
       
       <div class="form-group">
@@ -1216,6 +1557,7 @@ async function renderEntriesView() {
       </button>
     </div>
     
+    ${!isEditing ? `
     <div class="card" style="max-width:800px; margin:0 auto;">
       <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Transactions</h3>
       
@@ -1248,6 +1590,7 @@ async function renderEntriesView() {
       <div id="recent-transactions"></div>
       <div id="load-more-container"></div>
     </div>
+    ` : ''}
   `;
   
   updateEntryForm();
@@ -1257,10 +1600,13 @@ async function renderEntriesView() {
     state.transactionsToShow = 30;
   }
   
-  // Populate category filter
-  populateCategoryFilter();
-  
-  await renderRecentTransactions();
+  // Only populate filters and render transactions if not editing
+  if (!isEditing) {
+    // Populate category filter
+    populateCategoryFilter();
+    
+    await renderRecentTransactions();
+  }
 }
 
 function populateCategoryFilter() {
@@ -1435,14 +1781,18 @@ async function renderRecentTransactions() {
           
           return `
             <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 0; border-bottom:1px solid var(--border-light);">
-              <div>
+              <div style="flex:1;">
                 <div style="font-size:15px; font-weight:500; color:var(--text);">${t.category}</div>
                 ${t.notes ? `<div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${t.notes}</div>` : ''}
               </div>
-              <div style="text-align:right;">
-                <div style="font-size:15px; font-weight:600; color:${amountColor};">
-                  ${isIncome && t.serviceAmount > 0 ? `$${t.serviceAmount.toFixed(2)}` : `$${amount.toFixed(2)}`}${tipText}
+              <div style="text-align:right; display:flex; align-items:center; gap:12px;">
+                <div>
+                  <div style="font-size:15px; font-weight:600; color:${amountColor};">
+                    ${isIncome && t.serviceAmount > 0 ? `$${t.serviceAmount.toFixed(2)}` : `$${amount.toFixed(2)}`}${tipText}
+                  </div>
                 </div>
+                <button onclick="editTransaction('${t.id}')" class="btn-secondary" style="padding:6px 12px; font-size:13px;">✎ Edit</button>
+                <button onclick="deleteTransaction('${t.id}')" class="btn-danger" style="padding:6px 12px; font-size:13px;">✕ Delete</button>
               </div>
             </div>
           `;
@@ -1474,6 +1824,182 @@ async function renderRecentTransactions() {
 function loadMoreTransactions() {
   state.transactionsToShow = (state.transactionsToShow || 30) + 30;
   renderRecentTransactions();
+}
+
+async function editTransaction(id) {
+  const transaction = await db.transactions.get(id);
+  if (!transaction) {
+    showToast('Transaction not found');
+    return;
+  }
+  
+  // Store the transaction ID being edited
+  state.editingTransactionId = id;
+  
+  // Re-render entries view which will hide list and show edit mode
+  await renderEntriesView();
+  
+  // Scroll to top to see form
+  window.scrollTo(0, 0);
+  
+  // Now populate form with transaction data
+  if (transaction.type === 'INCOME') {
+    document.querySelector('input[name="entry-type"][value="INCOME"]').checked = true;
+    document.getElementById('entry-amount').value = transaction.serviceAmount || 0;
+    document.getElementById('entry-tip').value = transaction.tipAmount || 0;
+    document.getElementById('entry-date').value = transaction.date;
+  } else {
+    document.querySelector('input[name="entry-type"][value="EXPENSE"]').checked = true;
+    document.getElementById('entry-expense-amount').value = transaction.amount || 0;
+    document.getElementById('entry-date').value = transaction.date;
+  }
+  
+  document.getElementById('entry-category').value = transaction.category;
+  document.getElementById('entry-notes').value = transaction.notes || '';
+  
+  updateEntryForm();
+  
+  // Show edit banner
+  showEditBanner();
+  
+  // Change button to show Update and Cancel
+  const addButton = document.querySelector('.btn-primary');
+  if (addButton) {
+    addButton.textContent = 'Update Entry';
+    addButton.onclick = () => updateTransaction();
+    
+    // Add cancel button
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'btn-secondary';
+    cancelButton.textContent = 'Cancel Edit';
+    cancelButton.style.width = '100%';
+    cancelButton.style.marginTop = '12px';
+    cancelButton.onclick = () => cancelEdit();
+    addButton.parentNode.insertBefore(cancelButton, addButton.nextSibling);
+  }
+}
+
+function showEditBanner() {
+  // Remove any existing banner
+  const existingBanner = document.getElementById('edit-banner');
+  if (existingBanner) existingBanner.remove();
+  
+  // Create new banner
+  const banner = document.createElement('div');
+  banner.id = 'edit-banner';
+  banner.style.cssText = `
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: var(--danger);
+    color: white;
+    padding: 16px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 15px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  `;
+  banner.innerHTML = '✎ EDITING TRANSACTION';
+  
+  // Insert at top of content
+  const content = document.getElementById('content');
+  if (content && content.firstChild) {
+    content.insertBefore(banner, content.firstChild);
+  }
+}
+
+function hideEditBanner() {
+  const banner = document.getElementById('edit-banner');
+  if (banner) banner.remove();
+}
+
+function cancelEdit() {
+  // Clear editing state
+  delete state.editingTransactionId;
+  
+  // Hide edit banner
+  hideEditBanner();
+  
+  showToast('Edit cancelled');
+  
+  // Re-render entries view to show list again
+  renderEntriesView();
+}
+
+async function updateTransaction() {
+  const id = state.editingTransactionId;
+  if (!id) {
+    showToast('Error: No transaction to update');
+    return;
+  }
+  
+  const type = document.querySelector('input[name="entry-type"]:checked')?.value;
+  const category = document.getElementById('entry-category')?.value;
+  const notes = document.getElementById('entry-notes')?.value.trim() || '';
+  
+  let serviceAmount = 0;
+  let tipAmount = 0;
+  let expenseAmount = 0;
+  let entryDate = '';
+  
+  if (type === 'INCOME') {
+    serviceAmount = parseFloat(document.getElementById('entry-amount')?.value) || 0;
+    tipAmount = parseFloat(document.getElementById('entry-tip')?.value) || 0;
+    
+    if (serviceAmount <= 0 && tipAmount <= 0) {
+      showToast('Please enter service amount or tip');
+      return;
+    }
+    
+    entryDate = document.getElementById('entry-date').value;
+  } else {
+    expenseAmount = parseFloat(document.getElementById('entry-expense-amount')?.value) || 0;
+    
+    if (expenseAmount <= 0) {
+      showToast('Please enter a valid amount');
+      return;
+    }
+    
+    entryDate = document.getElementById('entry-date').value;
+  }
+  
+  try {
+    const updatedTransaction = {
+      type: type,
+      category: category,
+      notes: notes,
+      date: entryDate
+    };
+    
+    if (type === 'INCOME') {
+      updatedTransaction.serviceAmount = serviceAmount;
+      updatedTransaction.tipAmount = tipAmount;
+    } else {
+      updatedTransaction.amount = expenseAmount;
+    }
+    
+    // Update in Firestore
+    await firestore.collection('users').doc(auth.currentUser.uid)
+      .collection('transactions').doc(id).update(updatedTransaction);
+    
+    // Update in local DB
+    await db.transactions.update(id, updatedTransaction);
+    
+    // Clear editing state
+    delete state.editingTransactionId;
+    
+    // Hide edit banner
+    hideEditBanner();
+    
+    showToast('Transaction updated ✓');
+    
+    // Re-render entries view to show list again
+    await renderEntriesView();
+    
+  } catch (error) {
+    console.error('Error updating transaction:', error);
+    showToast('Error updating transaction');
+  }
 }
 
 function updateEntryForm() {
