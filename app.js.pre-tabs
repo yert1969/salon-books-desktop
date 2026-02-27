@@ -1473,17 +1473,6 @@ async function renderEntriesView() {
       <p class="page-subtitle">Add and manage all transactions</p>
     </div>
     
-    <!-- Tab Navigation -->
-    <div style="border-bottom:2px solid var(--border); margin-bottom:24px;">
-      <div style="display:flex; gap:8px;">
-        <button class="tab-btn active" onclick="switchEntriesTab('add')">Add Transaction</button>
-        <button class="tab-btn" onclick="switchEntriesTab('search')">Browse & Search</button>
-      </div>
-    </div>
-    
-    <!-- Add Tab Content -->
-    <div id="add-tab">
-    
     <div class="card" style="max-width:600px; margin:0 auto ${isEditing ? '' : '24px auto'};">
       <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Add Transaction</h3>
       
@@ -1569,10 +1558,6 @@ async function renderEntriesView() {
     </div>
     
     ${!isEditing ? `
-    </div>
-    
-    <!-- Search Tab Content -->
-    <div id="search-tab" style="display:none;">
     <div class="card" style="max-width:800px; margin:0 auto;">
       <h3 style="font-size:18px; margin-bottom:20px; font-weight:600;">Transactions</h3>
       
@@ -1606,7 +1591,6 @@ async function renderEntriesView() {
       <div id="load-more-container"></div>
     </div>
     ` : ''}
-    </div>
   `;
   
   updateEntryForm();
@@ -1623,30 +1607,6 @@ async function renderEntriesView() {
     
     await renderRecentTransactions();
   }
-}
-
-function switchEntriesTab(tab) {
-  state.entriesTab = tab;
-  
-  // Show/hide tabs
-  const addTab = document.getElementById("add-tab");
-  const searchTab = document.getElementById("search-tab");
-  
-  if (addTab && searchTab) {
-    if (tab === "add") {
-      addTab.style.display = "block";
-      searchTab.style.display = "none";
-    } else {
-      addTab.style.display = "none";
-      searchTab.style.display = "block";
-    }
-  }
-  
-  // Update tab button styles
-  document.querySelectorAll(".tab-btn").forEach(btn => {
-    btn.classList.remove("active");
-  });
-  event.target.classList.add("active");
 }
 
 function populateCategoryFilter() {
