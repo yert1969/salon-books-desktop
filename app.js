@@ -420,7 +420,7 @@ async function saveCategories() {
 
 function categoryOptions(type) {
   const cats = type === 'INCOME' ? state.categories.INCOME : state.categories.EXPENSE;
-  return cats.map(name => `<option value="${name}">${name}</option>`).join('');
+  return [...cats].sort((a, b) => a.localeCompare(b)).map(name => `<option value="${name}">${name}</option>`).join('');
 }
 
 // ----------------------------------------------------------------
