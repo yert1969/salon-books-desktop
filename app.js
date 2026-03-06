@@ -178,6 +178,16 @@ const state = {
   transactionsToShow: 30,
   dashboardMonth: new Date().getMonth() + 1,
   dashboardYear: new Date().getFullYear(),
+  clientSort: 'total',
+  // Comparison report state
+  compareMonth: new Date().getMonth(),
+  compareYear: new Date().getFullYear(),
+  range1Start: `${new Date().getFullYear()}-01-01`,
+  range1End: todayStr(),
+  range2Start: `${new Date().getFullYear() - 1}-01-01`,
+  range2End: `${new Date().getFullYear() - 1}-12-31`,
+  yoyYear1: new Date().getFullYear() - 1,
+  yoyYear2: new Date().getFullYear(),
 };
 
 // ----------------------------------------------------------------
@@ -1811,7 +1821,22 @@ async function renderClientsView() {
   });
   
   let clientList = Object.values(clients);
-  clientList.sort((a, b) => b.total - a.total);
+  
+  // Sort based on current sort setting
+  const sortBy = state.clientSort || 'total';
+  switch(sortBy) {
+    case 'total': clientList.sort((a, b) => b.total - a.total); break;
+    case 'visits': clientList.sort((a, b) => b.visits - a.visits); break;
+    case 'firstName': clientList.sort((a, b) => a.name.localeCompare(b.name)); break;
+    case 'lastName': 
+      clientList.sort((a, b) => {
+        const aLast = a.name.split(' ').pop() || a.name;
+        const bLast = b.name.split(' ').pop() || b.name;
+        return aLast.localeCompare(bLast);
+      }); 
+      break;
+    case 'recent': clientList.sort((a, b) => (b.lastVisit || '').localeCompare(a.lastVisit || '')); break;
+  }
   
   const today = todayStr();
   
@@ -1821,7 +1846,17 @@ async function renderClientsView() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
         <input type="text" class="search-input" id="client-search" placeholder="Search clients..." oninput="filterClients()">
       </div>
-      <div style="color:var(--text-muted);font-size:14px;">${clientList.length} clients</div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <label style="font-size:13px;color:var(--text-muted);">Sort by:</label>
+        <select class="form-select" style="width:150px;padding:8px 12px;" onchange="state.clientSort=this.value;renderClientsView()">
+          <option value="total" ${sortBy === 'total' ? 'selected' : ''}>Total Spent</option>
+          <option value="visits" ${sortBy === 'visits' ? 'selected' : ''}>Number of Visits</option>
+          <option value="firstName" ${sortBy === 'firstName' ? 'selected' : ''}>First Name</option>
+          <option value="lastName" ${sortBy === 'lastName' ? 'selected' : ''}>Last Name</option>
+          <option value="recent" ${sortBy === 'recent' ? 'selected' : ''}>Most Recent</option>
+        </select>
+        <span style="color:var(--text-muted);font-size:14px;">${clientList.length} clients</span>
+      </div>
     </div>
     <div class="clients-grid" id="clients-grid">
   `;
@@ -1938,10 +1973,15 @@ async function renderReportsView() {
     { id: 'daily', label: 'Daily' },
     { id: 'weekly', label: 'Weekly' },
     { id: 'monthly', label: 'Monthly' },
+    { id: 'monthcompare', label: 'Month Compare' },
+    { id: 'daterange', label: 'Date Range' },
     { id: 'annual', label: 'Annual' },
+    { id: 'yoy', label: 'Year vs Year' },
     { id: 'category', label: 'By Category' },
     { id: 'pnl', label: 'P&L' },
     { id: 'boothrent', label: 'Booth Rent' },
+    { id: 'clients', label: 'Clients' },
+    { id: 'export', label: '📥 Export' },
   ];
   
   let html = `
@@ -1975,10 +2015,15 @@ async function renderReport(type) {
     case 'daily': await renderDailyReport(output, controls); break;
     case 'weekly': await renderWeeklyReport(output, controls); break;
     case 'monthly': await renderMonthlyReport(output, controls); break;
+    case 'monthcompare': await renderMonthCompareReport(output, controls); break;
+    case 'daterange': await renderDateRangeReport(output, controls); break;
     case 'annual': await renderAnnualReport(output, controls); break;
+    case 'yoy': await renderYOYReport(output, controls); break;
     case 'category': await renderCategoryReport(output, controls); break;
     case 'pnl': await renderPnLReport(output, controls); break;
     case 'boothrent': await renderBoothRentReport(output, controls); break;
+    case 'clients': await renderClientsReport(output, controls); break;
+    case 'export': await renderExportReport(output, controls); break;
     default: output.innerHTML = '<p>Select a report type</p>';
   }
 }
@@ -2446,6 +2491,387 @@ async function renderBoothRentReport(output, controls) {
       <tbody>${rows}</tbody>
     </table>
   `;
+}
+
+// Month Compare Report
+async function renderMonthCompareReport(output, controls) {
+  const m1 = state.selectedMonth;
+  const y1 = state.selectedYear;
+  const m2 = state.compareMonth;
+  const y2 = state.compareYear;
+  
+  controls.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Month 1:</span>
+        <select class="form-select" style="width:120px;" onchange="state.selectedMonth=parseInt(this.value);renderReport('monthcompare')">
+          ${Array.from({length:12},(_,i) => `<option value="${i+1}" ${i+1===m1?'selected':''}>${monthName(i+1)}</option>`).join('')}
+        </select>
+        <input type="number" class="form-input" style="width:90px;" value="${y1}" onchange="state.selectedYear=parseInt(this.value);renderReport('monthcompare')">
+      </div>
+      <span style="font-size:18px;">vs</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Month 2:</span>
+        <select class="form-select" style="width:120px;" onchange="state.compareMonth=parseInt(this.value);renderReport('monthcompare')">
+          ${Array.from({length:12},(_,i) => `<option value="${i+1}" ${i+1===m2?'selected':''}>${monthName(i+1)}</option>`).join('')}
+        </select>
+        <input type="number" class="form-input" style="width:90px;" value="${y2}" onchange="state.compareYear=parseInt(this.value);renderReport('monthcompare')">
+      </div>
+    </div>
+  `;
+  
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
+  function getMonthData(month, year) {
+    const monthStr = `${year}-${String(month).padStart(2, '0')}`;
+    const txns = allTxns.filter(t => t.date?.startsWith(monthStr));
+    const mExp = allMExp.filter(e => e.year === year && e.month === month);
+    
+    const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const expenses = dailyExp + monthlyExp;
+    const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
+    
+    return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
+  }
+  
+  const d1 = getMonthData(m1, y1);
+  const d2 = getMonthData(m2, y2);
+  
+  function pctChange(a, b) {
+    if (b === 0) return a > 0 ? '+∞' : '0';
+    const pct = Math.round(((a - b) / b) * 100);
+    return (pct >= 0 ? '+' : '') + pct + '%';
+  }
+  
+  output.innerHTML = `
+    <div class="comparison-grid">
+      <div class="comparison-card">
+        <div class="comparison-label">${monthName(m1)} ${y1}</div>
+        <div class="comparison-value" style="color:var(--success);">${fmt(d1.income)}</div>
+        <div class="comparison-amount">Income</div>
+      </div>
+      <div class="comparison-card">
+        <div class="comparison-label">${monthName(m2)} ${y2}</div>
+        <div class="comparison-value" style="color:var(--success);">${fmt(d2.income)}</div>
+        <div class="comparison-amount">Income</div>
+      </div>
+    </div>
+    
+    <table class="data-table" style="margin-top:24px;">
+      <thead><tr><th style="text-align:left;">Metric</th><th>${monthName(m1)} ${y1}</th><th>${monthName(m2)} ${y2}</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td style="text-align:left;">Income</td><td style="color:var(--success);">${fmt(d1.income)}</td><td style="color:var(--success);">${fmt(d2.income)}</td><td>${pctChange(d1.income, d2.income)}</td></tr>
+        <tr><td style="text-align:left;">Expenses</td><td style="color:var(--danger);">${fmt(d1.expenses)}</td><td style="color:var(--danger);">${fmt(d2.expenses)}</td><td>${pctChange(d1.expenses, d2.expenses)}</td></tr>
+        <tr><td style="text-align:left;">Net Profit</td><td style="color:${d1.net>=0?'var(--success)':'var(--danger)'};">${fmt(d1.net)}</td><td style="color:${d2.net>=0?'var(--success)':'var(--danger)'};">${fmt(d2.net)}</td><td>${pctChange(d1.net, d2.net)}</td></tr>
+        <tr><td style="text-align:left;">Clients</td><td>${d1.clients}</td><td>${d2.clients}</td><td>${pctChange(d1.clients, d2.clients)}</td></tr>
+        <tr><td style="text-align:left;">Transactions</td><td>${d1.txnCount}</td><td>${d2.txnCount}</td><td>${pctChange(d1.txnCount, d2.txnCount)}</td></tr>
+      </tbody>
+    </table>
+  `;
+}
+
+// Date Range Comparison Report
+async function renderDateRangeReport(output, controls) {
+  controls.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Range 1:</span>
+        <input type="date" class="form-input" style="width:150px;" value="${state.range1Start}" onchange="state.range1Start=this.value;renderReport('daterange')">
+        <span>to</span>
+        <input type="date" class="form-input" style="width:150px;" value="${state.range1End}" onchange="state.range1End=this.value;renderReport('daterange')">
+      </div>
+      <span style="font-size:18px;">vs</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Range 2:</span>
+        <input type="date" class="form-input" style="width:150px;" value="${state.range2Start}" onchange="state.range2Start=this.value;renderReport('daterange')">
+        <span>to</span>
+        <input type="date" class="form-input" style="width:150px;" value="${state.range2End}" onchange="state.range2End=this.value;renderReport('daterange')">
+      </div>
+    </div>
+  `;
+  
+  const allTxns = await db.transactions.toArray();
+  
+  function getRangeData(start, end) {
+    const txns = allTxns.filter(t => t.date >= start && t.date <= end);
+    const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    const expenses = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
+    return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
+  }
+  
+  const d1 = getRangeData(state.range1Start, state.range1End);
+  const d2 = getRangeData(state.range2Start, state.range2End);
+  
+  function pctChange(a, b) {
+    if (b === 0) return a > 0 ? '+∞' : '0';
+    const pct = Math.round(((a - b) / b) * 100);
+    return (pct >= 0 ? '+' : '') + pct + '%';
+  }
+  
+  output.innerHTML = `
+    <div class="comparison-grid">
+      <div class="comparison-card">
+        <div class="comparison-label">Range 1</div>
+        <div class="comparison-value" style="color:var(--success);">${fmt(d1.income)}</div>
+        <div class="comparison-amount">${formatDateShort(state.range1Start)} – ${formatDateShort(state.range1End)}</div>
+      </div>
+      <div class="comparison-card">
+        <div class="comparison-label">Range 2</div>
+        <div class="comparison-value" style="color:var(--success);">${fmt(d2.income)}</div>
+        <div class="comparison-amount">${formatDateShort(state.range2Start)} – ${formatDateShort(state.range2End)}</div>
+      </div>
+    </div>
+    
+    <table class="data-table" style="margin-top:24px;">
+      <thead><tr><th style="text-align:left;">Metric</th><th>Range 1</th><th>Range 2</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td style="text-align:left;">Income</td><td style="color:var(--success);">${fmt(d1.income)}</td><td style="color:var(--success);">${fmt(d2.income)}</td><td>${pctChange(d1.income, d2.income)}</td></tr>
+        <tr><td style="text-align:left;">Expenses</td><td style="color:var(--danger);">${fmt(d1.expenses)}</td><td style="color:var(--danger);">${fmt(d2.expenses)}</td><td>${pctChange(d1.expenses, d2.expenses)}</td></tr>
+        <tr><td style="text-align:left;">Net Profit</td><td style="color:${d1.net>=0?'var(--success)':'var(--danger)'};">${fmt(d1.net)}</td><td style="color:${d2.net>=0?'var(--success)':'var(--danger)'};">${fmt(d2.net)}</td><td>${pctChange(d1.net, d2.net)}</td></tr>
+        <tr><td style="text-align:left;">Clients</td><td>${d1.clients}</td><td>${d2.clients}</td><td>${pctChange(d1.clients, d2.clients)}</td></tr>
+      </tbody>
+    </table>
+  `;
+}
+
+// Year over Year Report
+async function renderYOYReport(output, controls) {
+  controls.innerHTML = `
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Year 1:</span>
+        <input type="number" class="form-input" style="width:100px;" value="${state.yoyYear1}" min="2020" max="2099" onchange="state.yoyYear1=parseInt(this.value);renderReport('yoy')">
+      </div>
+      <span style="font-size:18px;">vs</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Year 2:</span>
+        <input type="number" class="form-input" style="width:100px;" value="${state.yoyYear2}" min="2020" max="2099" onchange="state.yoyYear2=parseInt(this.value);renderReport('yoy')">
+      </div>
+    </div>
+  `;
+  
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
+  function getYearData(year) {
+    const yearStr = String(year);
+    const txns = allTxns.filter(t => t.date?.startsWith(yearStr));
+    const mExp = allMExp.filter(e => e.year === year);
+    
+    const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const expenses = dailyExp + monthlyExp;
+    const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
+    
+    return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
+  }
+  
+  const d1 = getYearData(state.yoyYear1);
+  const d2 = getYearData(state.yoyYear2);
+  
+  function pctChange(a, b) {
+    if (b === 0) return a > 0 ? '+∞' : '0';
+    const pct = Math.round(((a - b) / b) * 100);
+    return (pct >= 0 ? '+' : '') + pct + '%';
+  }
+  
+  // Monthly breakdown
+  let monthRows = '';
+  for (let m = 1; m <= 12; m++) {
+    const m1Str = `${state.yoyYear1}-${String(m).padStart(2, '0')}`;
+    const m2Str = `${state.yoyYear2}-${String(m).padStart(2, '0')}`;
+    
+    const inc1 = allTxns.filter(t => t.date?.startsWith(m1Str) && t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    const inc2 = allTxns.filter(t => t.date?.startsWith(m2Str) && t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+    
+    monthRows += `<tr><td style="text-align:left;">${monthName(m)}</td><td>${fmt(inc1)}</td><td>${fmt(inc2)}</td><td>${pctChange(inc2, inc1)}</td></tr>`;
+  }
+  
+  output.innerHTML = `
+    <div class="report-stat-grid" style="margin-bottom:24px;">
+      <div class="report-stat">
+        <div class="report-stat-label">${state.yoyYear1} Income</div>
+        <div class="report-stat-value green">${fmt(d1.income)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">${state.yoyYear2} Income</div>
+        <div class="report-stat-value green">${fmt(d2.income)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Change</div>
+        <div class="report-stat-value">${pctChange(d2.income, d1.income)}</div>
+      </div>
+    </div>
+    
+    <table class="data-table">
+      <thead><tr><th style="text-align:left;">Month</th><th>${state.yoyYear1}</th><th>${state.yoyYear2}</th><th>Change</th></tr></thead>
+      <tbody>
+        ${monthRows}
+        <tr style="font-weight:700;border-top:2px solid var(--plum);">
+          <td style="text-align:left;">TOTAL</td>
+          <td>${fmt(d1.income)}</td>
+          <td>${fmt(d2.income)}</td>
+          <td>${pctChange(d2.income, d1.income)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+}
+
+// Clients Report
+async function renderClientsReport(output, controls) {
+  controls.innerHTML = '';
+  
+  const txns = await db.transactions.toArray();
+  const incomes = txns.filter(t => t.type === 'INCOME' && t.clientName);
+  
+  const clients = {};
+  incomes.forEach(t => {
+    const name = t.clientName.trim();
+    if (!name) return;
+    if (!clients[name]) {
+      clients[name] = { name, total: 0, visits: 0, tips: 0, lastVisit: null };
+    }
+    const c = clients[name];
+    c.total += (t.serviceAmount || 0) + (t.tipAmount || 0);
+    c.tips += t.tipAmount || 0;
+    c.visits++;
+    if (!c.lastVisit || t.date > c.lastVisit) c.lastVisit = t.date;
+  });
+  
+  const clientList = Object.values(clients).sort((a, b) => b.total - a.total);
+  const totalSpent = clientList.reduce((s, c) => s + c.total, 0);
+  const totalVisits = clientList.reduce((s, c) => s + c.visits, 0);
+  
+  let rows = clientList.slice(0, 50).map((c, i) => `
+    <tr>
+      <td style="text-align:left;">${i + 1}</td>
+      <td style="text-align:left;font-weight:500;">${c.name}</td>
+      <td>${c.visits}</td>
+      <td style="color:var(--success);">${fmt(c.total)}</td>
+      <td>${fmt(c.total / c.visits)}</td>
+      <td>${c.lastVisit ? formatDateShort(c.lastVisit) : '-'}</td>
+    </tr>
+  `).join('');
+  
+  output.innerHTML = `
+    <div class="report-stat-grid" style="margin-bottom:24px;">
+      <div class="report-stat">
+        <div class="report-stat-label">Total Clients</div>
+        <div class="report-stat-value">${clientList.length}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Total Revenue</div>
+        <div class="report-stat-value green">${fmt(totalSpent)}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Total Visits</div>
+        <div class="report-stat-value">${totalVisits}</div>
+      </div>
+      <div class="report-stat">
+        <div class="report-stat-label">Avg per Client</div>
+        <div class="report-stat-value">${clientList.length > 0 ? fmt(totalSpent / clientList.length) : '$0'}</div>
+      </div>
+    </div>
+    
+    <table class="data-table">
+      <thead><tr><th style="text-align:left;">#</th><th style="text-align:left;">Client</th><th>Visits</th><th>Total Spent</th><th>Avg Ticket</th><th>Last Visit</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${clientList.length > 50 ? `<p style="text-align:center;color:var(--text-muted);padding:16px;">Showing top 50 of ${clientList.length} clients</p>` : ''}
+  `;
+}
+
+// Export Report
+async function renderExportReport(output, controls) {
+  controls.innerHTML = `
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">From:</span>
+        <input type="date" class="form-input" style="width:150px;" id="export-from" value="${state.range1Start}">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">To:</span>
+        <input type="date" class="form-input" style="width:150px;" id="export-to" value="${state.range1End}">
+      </div>
+    </div>
+  `;
+  
+  output.innerHTML = `
+    <div style="text-align:center;padding:40px;">
+      <div style="font-size:48px;margin-bottom:16px;">📥</div>
+      <h3 style="font-family:var(--font-display);font-size:20px;margin-bottom:8px;">Export Transactions</h3>
+      <p style="color:var(--text-muted);margin-bottom:24px;">Download your transactions as a CSV file for use in Excel or other spreadsheet software.</p>
+      
+      <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;">
+        <button class="btn-primary" onclick="exportTransactionsCSV()">📊 Export Transactions CSV</button>
+        <button class="btn-secondary" onclick="exportClientsCSV()">👥 Export Clients CSV</button>
+      </div>
+    </div>
+  `;
+}
+
+async function exportTransactionsCSV() {
+  const from = document.getElementById('export-from').value;
+  const to = document.getElementById('export-to').value;
+  
+  const txns = await db.transactions.toArray();
+  const filtered = txns.filter(t => t.date >= from && t.date <= to).sort((a, b) => a.date.localeCompare(b.date));
+  
+  let csv = 'Date,Type,Category,Client,Service Amount,Tip,Total,Payment Method,Notes\n';
+  filtered.forEach(t => {
+    const total = t.type === 'INCOME' ? (t.serviceAmount || 0) + (t.tipAmount || 0) : (t.amount || 0);
+    csv += `${t.date},${t.type},"${t.category || ''}","${t.clientName || ''}",${t.serviceAmount || 0},${t.tipAmount || 0},${total},${t.paymentMethod || ''},"${(t.notes || '').replace(/"/g, '""')}"\n`;
+  });
+  
+  downloadCSV(csv, `transactions-${from}-to-${to}.csv`);
+  showToast(`Exported ${filtered.length} transactions`);
+}
+
+async function exportClientsCSV() {
+  const txns = await db.transactions.toArray();
+  const incomes = txns.filter(t => t.type === 'INCOME' && t.clientName);
+  
+  const clients = {};
+  incomes.forEach(t => {
+    const name = t.clientName.trim();
+    if (!name) return;
+    if (!clients[name]) clients[name] = { name, total: 0, visits: 0, tips: 0, lastVisit: null };
+    const c = clients[name];
+    c.total += (t.serviceAmount || 0) + (t.tipAmount || 0);
+    c.tips += t.tipAmount || 0;
+    c.visits++;
+    if (!c.lastVisit || t.date > c.lastVisit) c.lastVisit = t.date;
+  });
+  
+  const clientList = Object.values(clients).sort((a, b) => b.total - a.total);
+  
+  let csv = 'Client Name,Total Spent,Visits,Average Ticket,Total Tips,Last Visit\n';
+  clientList.forEach(c => {
+    csv += `"${c.name}",${c.total.toFixed(2)},${c.visits},${(c.total / c.visits).toFixed(2)},${c.tips.toFixed(2)},${c.lastVisit || ''}\n`;
+  });
+  
+  downloadCSV(csv, `clients-${todayStr()}.csv`);
+  showToast(`Exported ${clientList.length} clients`);
+}
+
+function downloadCSV(content, filename) {
+  const blob = new Blob([content], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ----------------------------------------------------------------
