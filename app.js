@@ -333,23 +333,79 @@ const DEFAULT_CATEGORIES = {
 };
 
 async function loadCategories() {
-  const doc = await db.settings.get('categoriesV2');
-  if (doc && doc.value) {
-    try {
-      state.categories = JSON.parse(doc.value);
-    } catch(e) {
-      state.categories = { ...DEFAULT_CATEGORIES };
+  let loaded = false;
+  
+  // Try to load from Firebase first (where mobile app stores them)
+  try {
+    const fbDoc = await firestore
+      .collection('users')
+      .doc(currentUser.uid)
+      .collection('settings')
+      .doc('categories')
+      .get();
+    
+    if (fbDoc.exists) {
+      const data = fbDoc.data();
+      if (data && (data.INCOME || data.EXPENSE)) {
+        state.categories = {
+          INCOME: data.INCOME || [],
+          EXPENSE: data.EXPENSE || []
+        };
+        loaded = true;
+        console.log('✓ Loaded categories from Firebase:', state.categories.INCOME.length, 'income,', state.categories.EXPENSE.length, 'expense');
+      }
     }
-  } else {
+  } catch(e) {
+    console.log('Firebase categories not available:', e.message);
+  }
+  
+  // Fall back to local settings if Firebase didn't work
+  if (!loaded) {
+    // Try 'categories' key first (what mobile uses locally)
+    let doc = await db.settings.get('categories');
+    if (!doc) {
+      doc = await db.settings.get('categoriesV2');
+    }
+    
+    if (doc && doc.value) {
+      try {
+        state.categories = JSON.parse(doc.value);
+        loaded = true;
+      } catch(e) {
+        console.log('Failed to parse local categories');
+      }
+    }
+  }
+  
+  // Use defaults if nothing loaded
+  if (!loaded) {
     state.categories = { ...DEFAULT_CATEGORIES };
   }
   
-  if (!state.categories.INCOME) state.categories.INCOME = [...DEFAULT_CATEGORIES.INCOME];
-  if (!state.categories.EXPENSE) state.categories.EXPENSE = [...DEFAULT_CATEGORIES.EXPENSE];
+  // Ensure arrays exist
+  if (!state.categories.INCOME || !state.categories.INCOME.length) {
+    state.categories.INCOME = [...DEFAULT_CATEGORIES.INCOME];
+  }
+  if (!state.categories.EXPENSE || !state.categories.EXPENSE.length) {
+    state.categories.EXPENSE = [...DEFAULT_CATEGORIES.EXPENSE];
+  }
 }
 
 async function saveCategories() {
-  await db.settings.put({ key: 'categoriesV2', value: JSON.stringify(state.categories) });
+  // Save locally
+  await db.settings.put({ key: 'categories', value: JSON.stringify(state.categories) });
+  
+  // Also sync to Firebase (so mobile app sees changes)
+  try {
+    await firestore
+      .collection('users')
+      .doc(currentUser.uid)
+      .collection('settings')
+      .doc('categories')
+      .set(state.categories);
+  } catch(e) {
+    console.error('Failed to sync categories to Firebase:', e);
+  }
 }
 
 function categoryOptions(type) {
@@ -606,7 +662,7 @@ function dashboardNav(direction) {
 async function renderEntriesView() {
   const content = document.getElementById('app-content');
   
-  html = `
+  let html = `
     <div class="entries-layout">
       <div class="entries-main">
         <!-- View Mode Tabs -->
