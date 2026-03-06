@@ -188,6 +188,17 @@ const state = {
   range2End: `${new Date().getFullYear() - 1}-12-31`,
   yoyYear1: new Date().getFullYear() - 1,
   yoyYear2: new Date().getFullYear(),
+  // Clients report state
+  clientsReportSort: 'total',
+  clientsReportMonth: null, // null = all time
+  clientsReportShowAll: false,
+  // Category report state
+  catReportFrom: `${new Date().getFullYear()}-01-01`,
+  catReportTo: todayStr(),
+  // Booth rent report state
+  boothRentYear: new Date().getFullYear(),
+  // Direct cost categories (for P&L)
+  directCostCategories: [],
 };
 
 // ----------------------------------------------------------------
@@ -549,13 +560,14 @@ async function renderDashboard() {
   const maxDayVal = Math.max(...thisWeekDays, ...lastWeekDays, 1);
   const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   
-  // Booth rent for current week
+  // Booth rent for prior week (rent is due Saturday for the previous week)
   const activeRenters = allRenters.filter(r => r.status === 'active');
+  const rentWeekStart = lastWeekStart; // Use last week, not current week
   let rentExpected = 0;
   let rentCollected = 0;
   activeRenters.forEach(r => {
-    rentExpected += getRateForWeek(r, weekStart);
-    const pmt = allRentPmts.find(p => p.renterId === r.id && p.weekStart === weekStart);
+    rentExpected += getRateForWeek(r, rentWeekStart);
+    const pmt = allRentPmts.find(p => p.renterId === r.id && p.weekStart === rentWeekStart);
     if (pmt) rentCollected += pmt.amount || 0;
   });
   const rentOutstanding = Math.max(0, rentExpected - rentCollected);
@@ -632,7 +644,7 @@ async function renderDashboard() {
       
       <!-- Booth Rent Status -->
       <div class="card">
-        <div class="card-title" style="margin-bottom:16px;">Booth Rent This Week</div>
+        <div class="card-title" style="margin-bottom:16px;">Booth Rent Last Week</div>
         ${activeRenters.length === 0 ? `
           <div class="empty-state" style="padding:20px;">
             <div class="empty-icon">🏠</div>
@@ -2292,71 +2304,113 @@ async function renderAnnualReport(output, controls) {
 }
 
 async function renderCategoryReport(output, controls) {
-  controls.innerHTML = '';
+  controls.innerHTML = `
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">From:</span>
+        <input type="date" class="form-input" style="width:150px;" value="${state.catReportFrom}" onchange="state.catReportFrom=this.value;renderReport('category')">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">To:</span>
+        <input type="date" class="form-input" style="width:150px;" value="${state.catReportTo}" onchange="state.catReportTo=this.value;renderReport('category')">
+      </div>
+    </div>
+  `;
   
   const [allTxns, allMExp] = await Promise.all([
     db.transactions.toArray(),
     db.monthlyExpenses.toArray()
   ]);
   
+  const from = state.catReportFrom;
+  const to = state.catReportTo;
+  
+  // Filter transactions by date range
+  const txns = allTxns.filter(t => t.date >= from && t.date <= to);
+  
+  // Filter monthly expenses by date range
+  const monthlyExp = allMExp.filter(e => {
+    if (!e.month || !e.year) return false;
+    const monthDate = `${e.year}-${String(e.month).padStart(2,'0')}-01`;
+    return monthDate >= from && monthDate <= to;
+  });
+  
   // Income by category
   const incCats = {};
-  allTxns.filter(t => t.type === 'INCOME').forEach(t => {
+  txns.filter(t => t.type === 'INCOME').forEach(t => {
     incCats[t.category] = (incCats[t.category] || 0) + (t.serviceAmount || 0) + (t.tipAmount || 0);
   });
   
   // Expense by category
   const expCats = {};
-  allTxns.filter(t => t.type === 'EXPENSE').forEach(t => {
+  txns.filter(t => t.type === 'EXPENSE').forEach(t => {
     expCats[t.category] = (expCats[t.category] || 0) + (t.amount || 0);
   });
-  allMExp.forEach(e => {
+  monthlyExp.forEach(e => {
     expCats[e.category] = (expCats[e.category] || 0) + (e.amount || 0);
   });
   
   const incTotal = Object.values(incCats).reduce((a, b) => a + b, 0);
   const expTotal = Object.values(expCats).reduce((a, b) => a + b, 0);
+  const hasInc = Object.keys(incCats).length > 0;
+  const hasExp = Object.keys(expCats).length > 0;
   
-  const incRows = Object.entries(incCats).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => `
+  const sortedInc = Object.entries(incCats).sort((a, b) => b[1] - a[1]);
+  const sortedExp = Object.entries(expCats).sort((a, b) => b[1] - a[1]);
+  
+  const incRows = sortedInc.map(([cat, amt]) => `
     <div class="report-row">
       <div class="report-row-label">${cat}</div>
       <div style="display:flex;gap:16px;align-items:center;">
         <span style="color:var(--text-muted);font-size:13px;">${incTotal > 0 ? Math.round((amt / incTotal) * 100) : 0}%</span>
-        <span class="report-row-value income">${fmt(amt)}</span>
+        <span class="report-row-value income">+${fmt(amt)}</span>
       </div>
     </div>
   `).join('');
   
-  const expRows = Object.entries(expCats).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => `
+  const expRows = sortedExp.map(([cat, amt]) => `
     <div class="report-row">
       <div class="report-row-label">${cat}</div>
       <div style="display:flex;gap:16px;align-items:center;">
         <span style="color:var(--text-muted);font-size:13px;">${expTotal > 0 ? Math.round((amt / expTotal) * 100) : 0}%</span>
-        <span class="report-row-value expense">${fmt(amt)}</span>
+        <span class="report-row-value expense">-${fmt(amt)}</span>
       </div>
     </div>
   `).join('');
   
   output.innerHTML = `
+    <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">${formatDateShort(from)} — ${formatDateShort(to)}</div>
+    
     <div class="grid-2" style="gap:32px;">
-      <div>
+      <div class="card">
         <div class="report-section-title">Income by Category</div>
-        <div style="font-size:24px;font-weight:700;color:var(--success);margin-bottom:16px;">${fmt(incTotal)}</div>
+        <div style="font-size:28px;font-weight:700;color:var(--success);margin-bottom:16px;">${fmt(incTotal)}</div>
+        ${hasInc ? `<div class="pie-chart-wrap"><canvas id="pie-income" width="280" height="280"></canvas></div>` : ''}
         ${incRows || '<p style="color:var(--text-muted);">No income data</p>'}
       </div>
-      <div>
+      <div class="card">
         <div class="report-section-title">Expenses by Category</div>
-        <div style="font-size:24px;font-weight:700;color:var(--danger);margin-bottom:16px;">${fmt(expTotal)}</div>
+        <div style="font-size:28px;font-weight:700;color:var(--danger);margin-bottom:16px;">${fmt(expTotal)}</div>
+        ${hasExp ? `<div class="pie-chart-wrap"><canvas id="pie-expense" width="280" height="280"></canvas></div>` : ''}
         ${expRows || '<p style="color:var(--text-muted);">No expense data</p>'}
       </div>
     </div>
   `;
+  
+  // Draw pie charts after DOM is ready
+  if (hasInc) {
+    drawPieChart('pie-income', sortedInc.map(([k]) => k), sortedInc.map(([,v]) => v));
+  }
+  if (hasExp) {
+    drawPieChart('pie-expense', sortedExp.map(([k]) => k), sortedExp.map(([,v]) => v));
+  }
 }
 
 async function renderPnLReport(output, controls) {
   const m = state.selectedMonth;
   const y = state.selectedYear;
   const monthStr = `${y}-${String(m).padStart(2, '0')}`;
+  const yearStr = String(y);
   
   controls.innerHTML = `
     <button class="btn-icon" onclick="state.selectedMonth--;if(state.selectedMonth<1){state.selectedMonth=12;state.selectedYear--;}renderReport('pnl')">‹</button>
@@ -2371,60 +2425,183 @@ async function renderPnLReport(output, controls) {
     db.rentPayments.toArray()
   ]);
   
-  const txns = allTxns.filter(t => t.date && t.date.startsWith(monthStr));
-  const mExp = allMExp.filter(e => e.year === y && e.month === m);
+  // Load direct cost categories from settings
+  const directCatsDoc = await db.settings.get('directCostCategories');
+  const directCats = directCatsDoc?.value ? JSON.parse(directCatsDoc.value) : [];
+  const isDirect = (cat) => directCats.includes(cat);
   
-  // Revenue
-  const services = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0), 0);
-  const tips = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.tipAmount || 0), 0);
+  const monthTxns = allTxns.filter(t => t.date?.startsWith(monthStr));
+  const ytdTxns = allTxns.filter(t => t.date?.startsWith(yearStr));
   
-  // Booth rent collected this month
-  const monthRent = allRentPmts.filter(p => p.weekStart && p.weekStart.startsWith(monthStr))
-    .reduce((s, p) => s + (p.amount || 0), 0);
+  // Revenue by category
+  const revenueLines = {};
+  monthTxns.filter(t => t.type === 'INCOME').forEach(t => {
+    const key = t.category || 'Other';
+    if (!revenueLines[key]) revenueLines[key] = { month: 0, ytd: 0 };
+    revenueLines[key].month += (t.serviceAmount || 0);
+  });
+  ytdTxns.filter(t => t.type === 'INCOME').forEach(t => {
+    const key = t.category || 'Other';
+    if (!revenueLines[key]) revenueLines[key] = { month: 0, ytd: 0 };
+    revenueLines[key].ytd += (t.serviceAmount || 0);
+  });
   
-  const totalRevenue = services + tips + monthRent;
+  // Tips
+  const monthTips = monthTxns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.tipAmount || 0), 0);
+  const ytdTips = ytdTxns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.tipAmount || 0), 0);
+  
+  // Booth rent
+  const monthRent = allRentPmts.filter(p => p.datePaid?.startsWith(monthStr)).reduce((s,p) => s + (p.amount || 0), 0);
+  const ytdRent = allRentPmts.filter(p => p.datePaid?.startsWith(yearStr)).reduce((s,p) => s + (p.amount || 0), 0);
+  
+  const monthServiceTotal = Object.values(revenueLines).reduce((s,r) => s + r.month, 0);
+  const ytdServiceTotal = Object.values(revenueLines).reduce((s,r) => s + r.ytd, 0);
+  const monthGrossRevenue = monthServiceTotal + monthTips + monthRent;
+  const ytdGrossRevenue = ytdServiceTotal + ytdTips + ytdRent;
   
   // Expenses
-  const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
-  const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
-  const totalExpenses = dailyExp + monthlyExp;
+  const directLines = {};
+  const overheadLines = {};
   
-  const netProfit = totalRevenue - totalExpenses;
-  const margin = totalRevenue > 0 ? Math.round((netProfit / totalRevenue) * 100) : 0;
+  monthTxns.filter(t => t.type === 'EXPENSE').forEach(t => {
+    const cat = t.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].month += (t.amount || 0);
+  });
+  ytdTxns.filter(t => t.type === 'EXPENSE').forEach(t => {
+    const cat = t.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].ytd += (t.amount || 0);
+  });
+  
+  allMExp.filter(e => e.year === y && e.month === m).forEach(e => {
+    const cat = e.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].month += (e.amount || 0);
+  });
+  allMExp.filter(e => e.year === y && e.month <= m).forEach(e => {
+    const cat = e.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].ytd += (e.amount || 0);
+  });
+  
+  const monthDirectTotal = Object.values(directLines).reduce((s,r) => s + r.month, 0);
+  const ytdDirectTotal = Object.values(directLines).reduce((s,r) => s + r.ytd, 0);
+  const monthOverheadTotal = Object.values(overheadLines).reduce((s,r) => s + r.month, 0);
+  const ytdOverheadTotal = Object.values(overheadLines).reduce((s,r) => s + r.ytd, 0);
+  const monthTotalExpenses = monthDirectTotal + monthOverheadTotal;
+  const ytdTotalExpenses = ytdDirectTotal + ytdOverheadTotal;
+  
+  const monthGrossProfit = monthGrossRevenue - monthDirectTotal;
+  const ytdGrossProfit = ytdGrossRevenue - ytdDirectTotal;
+  const monthNetIncome = monthGrossRevenue - monthTotalExpenses;
+  const ytdNetIncome = ytdGrossRevenue - ytdTotalExpenses;
+  
+  const pctOf = (val, total) => total > 0 ? `${((val / total) * 100).toFixed(1)}%` : '—';
+  
+  const row = (label, mVal, yVal, indent = true, color = null) => `
+    <tr style="${color ? 'color:' + color + ';' : ''}">
+      <td style="padding:8px 0;${indent ? 'padding-left:16px;' : 'font-weight:600;'}">${label}</td>
+      <td style="text-align:right;padding:8px;">${fmt(mVal)}</td>
+      <td style="text-align:right;padding:8px;color:var(--text-muted);font-size:13px;">${pctOf(mVal, monthGrossRevenue)}</td>
+      <td style="text-align:right;padding:8px;">${fmt(yVal)}</td>
+      <td style="text-align:right;padding:8px;color:var(--text-muted);font-size:13px;">${pctOf(yVal, ytdGrossRevenue)}</td>
+    </tr>`;
+  
+  const subtotalRow = (label, mVal, yVal, color) => `
+    <tr style="font-weight:700;border-top:2px solid var(--border);${color ? 'color:' + color + ';' : ''}">
+      <td style="padding:12px 0;">${label}</td>
+      <td style="text-align:right;padding:12px;">${fmt(mVal)}</td>
+      <td style="text-align:right;padding:12px;font-size:13px;">${pctOf(mVal, monthGrossRevenue)}</td>
+      <td style="text-align:right;padding:12px;">${fmt(yVal)}</td>
+      <td style="text-align:right;padding:12px;font-size:13px;">${pctOf(yVal, ytdGrossRevenue)}</td>
+    </tr>`;
+  
+  const sortedRevenue = Object.entries(revenueLines).sort((a,b) => b[1].month - a[1].month);
+  const sortedDirect = Object.entries(directLines).sort((a,b) => b[1].month - a[1].month);
+  const sortedOverhead = Object.entries(overheadLines).sort((a,b) => b[1].month - a[1].month);
   
   output.innerHTML = `
-    <div class="report-section-title">Revenue</div>
-    <div class="report-row"><div class="report-row-label">Service Income</div><div class="report-row-value income">${fmt(services)}</div></div>
-    <div class="report-row"><div class="report-row-label">Tips</div><div class="report-row-value income">${fmt(tips)}</div></div>
-    <div class="report-row"><div class="report-row-label">Booth Rent Collected</div><div class="report-row-value income">${fmt(monthRent)}</div></div>
-    <div class="report-row" style="font-weight:700;border-top:2px solid var(--plum);margin-top:8px;padding-top:12px;">
-      <div class="report-row-label">Total Revenue</div>
-      <div class="report-row-value income">${fmt(totalRevenue)}</div>
+    <div class="report-section-title">${monthName(m)} ${y} — Profit & Loss</div>
+    
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--plum);">
+            <th style="text-align:left;padding:12px 0;color:var(--text-muted);font-size:12px;"></th>
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:12px;">${monthName(m).substring(0,3)}</th>
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:11px;">%</th>
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:12px;">YTD</th>
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:11px;">%</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5" style="padding:16px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--plum);">Revenue</td></tr>
+          ${sortedRevenue.map(([cat, v]) => row(cat, v.month, v.ytd)).join('')}
+          ${monthTips > 0 || ytdTips > 0 ? row('Tips', monthTips, ytdTips) : ''}
+          ${monthRent > 0 || ytdRent > 0 ? row('Booth Rent Collected', monthRent, ytdRent) : ''}
+          ${subtotalRow('Total Revenue', monthGrossRevenue, ytdGrossRevenue, 'var(--success)')}
+          
+          <tr><td colspan="5" style="padding:20px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--danger);">Cost of Goods / Direct Costs</td></tr>
+          ${sortedDirect.length > 0 ? sortedDirect.map(([cat, v]) => row(cat, v.month, v.ytd)).join('') : '<tr><td colspan="5" style="padding:8px 16px;color:var(--text-muted);font-style:italic;">None this period</td></tr>'}
+          ${subtotalRow('Total Direct Costs', monthDirectTotal, ytdDirectTotal, 'var(--danger)')}
+          ${subtotalRow('Gross Profit', monthGrossProfit, ytdGrossProfit, monthGrossProfit >= 0 ? 'var(--success)' : 'var(--danger)')}
+          
+          <tr><td colspan="5" style="padding:20px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--gold-dark);">Operating Expenses</td></tr>
+          ${sortedOverhead.length > 0 ? sortedOverhead.map(([cat, v]) => row(cat, v.month, v.ytd)).join('') : '<tr><td colspan="5" style="padding:8px 16px;color:var(--text-muted);font-style:italic;">None this period</td></tr>'}
+          ${subtotalRow('Total Operating Expenses', monthOverheadTotal, ytdOverheadTotal, 'var(--danger)')}
+          
+          <tr style="border-top:3px double var(--plum);font-weight:800;font-size:18px;">
+            <td style="padding:16px 0;color:var(--text);">Net Income</td>
+            <td style="text-align:right;padding:16px;color:${monthNetIncome >= 0 ? 'var(--success)' : 'var(--danger)'};">${fmt(monthNetIncome)}</td>
+            <td style="text-align:right;padding:16px;font-size:14px;color:var(--text-muted);">${pctOf(monthNetIncome, monthGrossRevenue)}</td>
+            <td style="text-align:right;padding:16px;color:${ytdNetIncome >= 0 ? 'var(--success)' : 'var(--danger)'};">${fmt(ytdNetIncome)}</td>
+            <td style="text-align:right;padding:16px;font-size:14px;color:var(--text-muted);">${pctOf(ytdNetIncome, ytdGrossRevenue)}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     
-    <div class="report-section-title" style="margin-top:24px;">Expenses</div>
-    <div class="report-row"><div class="report-row-label">Daily Expenses</div><div class="report-row-value expense">${fmt(dailyExp)}</div></div>
-    <div class="report-row"><div class="report-row-label">Monthly Expenses</div><div class="report-row-value expense">${fmt(monthlyExp)}</div></div>
-    <div class="report-row" style="font-weight:700;border-top:2px solid var(--plum);margin-top:8px;padding-top:12px;">
-      <div class="report-row-label">Total Expenses</div>
-      <div class="report-row-value expense">${fmt(totalExpenses)}</div>
+    <div class="card" style="margin-top:24px;background:var(--cream);">
+      <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:16px;">Key Metrics</div>
+      <div class="grid-4">
+        <div style="text-align:center;">
+          <div style="font-size:12px;color:var(--text-muted);">Gross Margin</div>
+          <div style="font-size:24px;font-weight:700;color:${monthGrossProfit/monthGrossRevenue >= 0.7 ? 'var(--success)' : 'var(--gold-dark)'};">${pctOf(monthGrossProfit, monthGrossRevenue)}</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:12px;color:var(--text-muted);">Net Margin</div>
+          <div style="font-size:24px;font-weight:700;color:${monthNetIncome >= 0 ? 'var(--success)' : 'var(--danger)'};">${pctOf(monthNetIncome, monthGrossRevenue)}</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:12px;color:var(--text-muted);">Services Revenue</div>
+          <div style="font-size:24px;font-weight:700;color:var(--plum);">${pctOf(monthServiceTotal + monthTips, monthGrossRevenue)}</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:12px;color:var(--text-muted);">Booth Rent Revenue</div>
+          <div style="font-size:24px;font-weight:700;color:var(--plum);">${pctOf(monthRent, monthGrossRevenue)}</div>
+        </div>
+      </div>
     </div>
     
-    <div class="report-stat-grid" style="margin-top:32px;">
-      <div class="report-stat">
-        <div class="report-stat-label">Net Profit</div>
-        <div class="report-stat-value ${netProfit >= 0 ? 'green' : 'red'}">${fmt(netProfit)}</div>
-      </div>
-      <div class="report-stat">
-        <div class="report-stat-label">Profit Margin</div>
-        <div class="report-stat-value">${margin}%</div>
-      </div>
+    <div style="margin-top:16px;font-size:12px;color:var(--text-muted);line-height:1.6;">
+      💡 <strong>Tip:</strong> Mark expense categories as "Direct" or "Overhead" in Settings → Categories to improve P&L accuracy.
     </div>
   `;
 }
 
 async function renderBoothRentReport(output, controls) {
-  controls.innerHTML = '';
+  const year = state.boothRentYear;
+  
+  controls.innerHTML = `
+    <button class="btn-icon" onclick="state.boothRentYear--;renderReport('boothrent')">‹</button>
+    <span style="font-weight:600;min-width:100px;text-align:center;">${year}</span>
+    <button class="btn-icon" onclick="state.boothRentYear++;renderReport('boothrent')">›</button>
+  `;
   
   const [allRenters, allPayments] = await Promise.all([
     db.renters.toArray(),
@@ -2442,54 +2619,131 @@ async function renderBoothRentReport(output, controls) {
     return;
   }
   
-  let rows = '';
-  let totalCollected = 0;
+  const yearPayments = allPayments.filter(p => p.datePaid?.startsWith(String(year)));
+  const mShort = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   
-  allRenters.forEach(r => {
-    const payments = allPayments.filter(p => p.renterId === r.id);
-    const collected = payments.reduce((s, p) => s + (p.amount || 0), 0);
-    totalCollected += collected;
+  // Build per-renter stats
+  const renterStats = allRenters.map(r => {
+    ensureRateHistory(r);
+    const pmts = yearPayments.filter(p => p.renterId === r.id);
+    const totalPaid = pmts.reduce((s, p) => s + (p.amount || 0), 0);
+    const onTime = pmts.filter(p => getRentStatus(p.weekStart, p.datePaid) === 'ontime').length;
+    const late = pmts.filter(p => getRentStatus(p.weekStart, p.datePaid) === 'late').length;
+    const total = pmts.length;
+    const onTimePct = total > 0 ? Math.round((onTime / total) * 100) : 0;
     
-    const onTime = payments.filter(p => getRentStatus(p.weekStart, p.datePaid) === 'ontime').length;
-    const late = payments.length - onTime;
-    const onTimeRate = payments.length > 0 ? Math.round((onTime / payments.length) * 100) : 0;
+    // Monthly breakdown
+    const months = {};
+    for (let m = 1; m <= 12; m++) {
+      const ms = `${year}-${String(m).padStart(2, '0')}`;
+      const mPmts = pmts.filter(p => p.datePaid?.startsWith(ms));
+      months[m] = {
+        paid: mPmts.reduce((s, p) => s + (p.amount || 0), 0),
+        count: mPmts.length,
+        onTime: mPmts.filter(p => getRentStatus(p.weekStart, p.datePaid) === 'ontime').length,
+      };
+    }
     
-    rows += `
-      <tr>
-        <td style="text-align:left;">
-          <div style="font-weight:600;">${r.name}</div>
-          <div style="font-size:12px;color:var(--text-muted);">${r.status === 'active' ? 'Active' : 'Inactive'}</div>
-        </td>
-        <td>${payments.length}</td>
-        <td style="color:var(--success);">${fmt(collected)}</td>
-        <td>${onTimeRate}%</td>
-        <td style="color:${late > 0 ? 'var(--danger)' : 'var(--success)'};">${late}</td>
-      </tr>
-    `;
+    // Avg days to pay
+    let totalDays = 0;
+    pmts.forEach(p => {
+      const ws = new Date(p.weekStart + 'T12:00:00');
+      const pd = new Date(p.datePaid + 'T12:00:00');
+      totalDays += Math.round((pd - ws) / 86400000);
+    });
+    const avgDaysToPay = total > 0 ? (totalDays / total).toFixed(1) : '—';
+    
+    // Calculate expected
+    const firstPmt = pmts.length > 0 ? pmts.reduce((e, p) => (!e || p.weekStart < e) ? p.weekStart : e, null) : null;
+    const rStart = r.startDate || `${year}-01-01`;
+    const effectiveStart = firstPmt && firstPmt < rStart ? firstPmt : rStart;
+    const rangeStart = effectiveStart > `${year}-01-01` ? effectiveStart : `${year}-01-01`;
+    const currentWS = getWeekStart(todayStr());
+    const lastCompletedWS = addDays(currentWS, -7);
+    const rangeEnd = `${year}-12-31` < lastCompletedWS ? `${year}-12-31` : lastCompletedWS;
+    
+    let expectedAmt = 0;
+    let cursor = getWeekStart(rangeStart);
+    while (cursor <= rangeEnd) {
+      expectedAmt += getRateForWeek(r, cursor);
+      cursor = addDays(cursor, 7);
+    }
+    const outstanding = Math.max(0, expectedAmt - totalPaid);
+    
+    return { id: r.id, name: r.name, booth: r.booth, rate: getCurrentRate(r), status: r.status,
+      totalPaid, onTime, late, total, onTimePct, months, avgDaysToPay, expectedAmt, outstanding };
   });
   
+  // Totals
+  const grandPaid = renterStats.reduce((s, r) => s + r.totalPaid, 0);
+  const grandExpected = renterStats.reduce((s, r) => s + r.expectedAmt, 0);
+  const grandOutstanding = renterStats.reduce((s, r) => s + r.outstanding, 0);
+  const grandOnTime = renterStats.reduce((s, r) => s + r.onTime, 0);
+  const grandLate = renterStats.reduce((s, r) => s + r.late, 0);
+  const grandTotal = renterStats.reduce((s, r) => s + r.total, 0);
+  const grandOnTimePct = grandTotal > 0 ? Math.round((grandOnTime / grandTotal) * 100) : 0;
+  
+  // Active months
+  const activeMo = [];
+  for (let m = 1; m <= 12; m++) {
+    if (renterStats.some(r => r.months[m].count > 0)) activeMo.push(m);
+  }
+  if (activeMo.length === 0) activeMo.push(new Date().getMonth() + 1);
+  
   output.innerHTML = `
+    <div class="report-section-title">${year} Booth Rent Summary</div>
+    
     <div class="report-stat-grid" style="margin-bottom:24px;">
-      <div class="report-stat">
-        <div class="report-stat-label">Total Collected</div>
-        <div class="report-stat-value green">${fmt(totalCollected)}</div>
-      </div>
-      <div class="report-stat">
-        <div class="report-stat-label">Total Renters</div>
-        <div class="report-stat-value">${allRenters.length}</div>
-      </div>
-      <div class="report-stat">
-        <div class="report-stat-label">Active</div>
-        <div class="report-stat-value">${allRenters.filter(r => r.status === 'active').length}</div>
-      </div>
+      <div class="report-stat"><div class="report-stat-label">Expected YTD</div><div class="report-stat-value">${fmt(grandExpected)}</div></div>
+      <div class="report-stat"><div class="report-stat-label">Collected</div><div class="report-stat-value green">${fmt(grandPaid)}</div></div>
+      <div class="report-stat"><div class="report-stat-label">${grandOutstanding > 0 ? 'Outstanding' : 'All Collected'}</div><div class="report-stat-value ${grandOutstanding > 0 ? 'red' : 'green'}">${grandOutstanding > 0 ? fmt(grandOutstanding) : '✓'}</div></div>
+      <div class="report-stat"><div class="report-stat-label">On-Time Rate</div><div class="report-stat-value ${grandOnTimePct >= 90 ? 'green' : grandOnTimePct >= 75 ? 'gold' : 'red'}">${grandOnTimePct}%</div></div>
     </div>
     
-    <table class="data-table">
-      <thead>
-        <tr><th style="text-align:left;">Renter</th><th>Payments</th><th>Collected</th><th>On-Time %</th><th>Late</th></tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
+    ${renterStats.filter(r => r.total > 0 || r.status === 'active').map(r => `
+      <div class="card" style="margin-bottom:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+          <div>
+            <div style="font-size:18px;font-weight:700;color:var(--text);">${r.name}${r.booth ? ` <span style="font-weight:400;color:var(--text-muted);font-size:13px;">Booth ${r.booth}</span>` : ''}</div>
+            <div style="font-size:13px;color:var(--text-muted);">${fmt(r.rate)}/week · ${r.status === 'active' ? '🟢 Active' : '⚪ Inactive'}</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:24px;font-weight:700;color:var(--success);">${fmt(r.totalPaid)}</div>
+            <div style="font-size:12px;color:var(--text-muted);">of ${fmt(r.expectedAmt)} expected</div>
+            ${r.outstanding > 0 ? `<div style="font-size:13px;font-weight:600;color:var(--danger);">Outstanding: ${fmt(r.outstanding)}</div>` : ''}
+          </div>
+        </div>
+        
+        <div class="grid-4" style="margin-bottom:16px;">
+          <div class="report-stat" style="background:var(--cream);"><div class="report-stat-label">On-Time</div><div class="report-stat-value ${r.onTimePct >= 90 ? 'green' : r.onTimePct >= 75 ? 'gold' : 'red'}">${r.onTimePct}%</div></div>
+          <div class="report-stat" style="background:var(--cream);"><div class="report-stat-label">Late</div><div class="report-stat-value ${r.late > 0 ? 'red' : 'green'}">${r.late}</div></div>
+          <div class="report-stat" style="background:var(--cream);"><div class="report-stat-label">Avg Days</div><div class="report-stat-value">${r.avgDaysToPay}</div></div>
+          <div class="report-stat" style="background:var(--cream);"><div class="report-stat-label">Balance</div><div class="report-stat-value ${r.outstanding > 0 ? 'red' : 'green'}">${r.outstanding > 0 ? fmt(r.outstanding) : '✓'}</div></div>
+        </div>
+        
+        <table class="data-table" style="font-size:13px;">
+          <thead>
+            <tr><th style="text-align:left;">Month</th>${activeMo.map(m => `<th style="text-align:center;">${mShort[m]}</th>`).join('')}<th style="text-align:right;">Total</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="text-align:left;">Paid</td>
+              ${activeMo.map(m => `<td style="text-align:center;color:${r.months[m].paid > 0 ? 'var(--success)' : 'var(--text-muted)'};">${r.months[m].paid > 0 ? fmt(r.months[m].paid) : '—'}</td>`).join('')}
+              <td style="text-align:right;font-weight:700;color:var(--success);">${fmt(r.totalPaid)}</td>
+            </tr>
+            <tr>
+              <td style="text-align:left;">Weeks</td>
+              ${activeMo.map(m => `<td style="text-align:center;">${r.months[m].count > 0 ? r.months[m].count : '—'}</td>`).join('')}
+              <td style="text-align:right;font-weight:700;">${r.total}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `).join('')}
+    
+    ${renterStats.filter(r => r.total > 0 || r.status === 'active').length === 0 ? `
+      <p style="color:var(--text-muted);text-align:center;padding:30px;">No booth rent data for ${year}.</p>
+    ` : ''}
   `;
 }
 
@@ -2729,10 +2983,50 @@ async function renderYOYReport(output, controls) {
 
 // Clients Report
 async function renderClientsReport(output, controls) {
-  controls.innerHTML = '';
+  const sortBy = state.clientsReportSort || 'total';
+  const filterMonth = state.clientsReportMonth; // null = all time
+  const showAll = state.clientsReportShowAll;
+  const year = state.selectedYear;
+  
+  // Build month options
+  const monthOpts = `<option value="">All Time</option>` + 
+    Array.from({length:12}, (_,i) => `<option value="${i+1}" ${filterMonth === i+1 ? 'selected' : ''}>${monthName(i+1)}</option>`).join('');
+  
+  controls.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Sort:</span>
+        <select class="form-select" style="width:150px;" onchange="state.clientsReportSort=this.value;renderReport('clients')">
+          <option value="total" ${sortBy === 'total' ? 'selected' : ''}>Total Spent</option>
+          <option value="visits" ${sortBy === 'visits' ? 'selected' : ''}>Number of Visits</option>
+          <option value="firstName" ${sortBy === 'firstName' ? 'selected' : ''}>First Name</option>
+          <option value="lastName" ${sortBy === 'lastName' ? 'selected' : ''}>Last Name</option>
+          <option value="recent" ${sortBy === 'recent' ? 'selected' : ''}>Most Recent</option>
+          <option value="avgTicket" ${sortBy === 'avgTicket' ? 'selected' : ''}>Avg Ticket</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-weight:600;">Period:</span>
+        <select class="form-select" style="width:120px;" onchange="state.clientsReportMonth=this.value?parseInt(this.value):null;renderReport('clients')">
+          ${monthOpts}
+        </select>
+        <input type="number" class="form-input" style="width:80px;" value="${year}" min="2020" max="2099" onchange="state.selectedYear=parseInt(this.value);renderReport('clients')">
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" ${showAll ? 'checked' : ''} onchange="state.clientsReportShowAll=this.checked;renderReport('clients')">
+        <span>Show All</span>
+      </label>
+    </div>
+  `;
   
   const txns = await db.transactions.toArray();
-  const incomes = txns.filter(t => t.type === 'INCOME' && t.clientName);
+  
+  // Filter by date if month selected
+  let incomes = txns.filter(t => t.type === 'INCOME' && t.clientName);
+  if (filterMonth) {
+    const monthStr = `${year}-${String(filterMonth).padStart(2, '0')}`;
+    incomes = incomes.filter(t => t.date?.startsWith(monthStr));
+  }
   
   const clients = {};
   incomes.forEach(t => {
@@ -2748,26 +3042,51 @@ async function renderClientsReport(output, controls) {
     if (!c.lastVisit || t.date > c.lastVisit) c.lastVisit = t.date;
   });
   
-  const clientList = Object.values(clients).sort((a, b) => b.total - a.total);
+  let clientList = Object.values(clients);
+  
+  // Sort
+  switch(sortBy) {
+    case 'total': clientList.sort((a, b) => b.total - a.total); break;
+    case 'visits': clientList.sort((a, b) => b.visits - a.visits); break;
+    case 'firstName': clientList.sort((a, b) => a.name.localeCompare(b.name)); break;
+    case 'lastName': 
+      clientList.sort((a, b) => {
+        const aLast = a.name.split(' ').pop() || a.name;
+        const bLast = b.name.split(' ').pop() || b.name;
+        return aLast.localeCompare(bLast);
+      }); 
+      break;
+    case 'recent': clientList.sort((a, b) => (b.lastVisit || '').localeCompare(a.lastVisit || '')); break;
+    case 'avgTicket': clientList.sort((a, b) => (b.total / b.visits) - (a.total / a.visits)); break;
+  }
+  
   const totalSpent = clientList.reduce((s, c) => s + c.total, 0);
   const totalVisits = clientList.reduce((s, c) => s + c.visits, 0);
+  const totalClients = clientList.length;
   
-  let rows = clientList.slice(0, 50).map((c, i) => `
+  const displayList = showAll ? clientList : clientList.slice(0, 50);
+  
+  let rows = displayList.map((c, i) => `
     <tr>
       <td style="text-align:left;">${i + 1}</td>
       <td style="text-align:left;font-weight:500;">${c.name}</td>
       <td>${c.visits}</td>
       <td style="color:var(--success);">${fmt(c.total)}</td>
       <td>${fmt(c.total / c.visits)}</td>
+      <td>${fmt(c.tips)}</td>
       <td>${c.lastVisit ? formatDateShort(c.lastVisit) : '-'}</td>
     </tr>
   `).join('');
   
+  const periodLabel = filterMonth ? `${monthName(filterMonth)} ${year}` : 'All Time';
+  
   output.innerHTML = `
+    <div class="report-section-title">Client Report — ${periodLabel}</div>
+    
     <div class="report-stat-grid" style="margin-bottom:24px;">
       <div class="report-stat">
         <div class="report-stat-label">Total Clients</div>
-        <div class="report-stat-value">${clientList.length}</div>
+        <div class="report-stat-value">${totalClients}</div>
       </div>
       <div class="report-stat">
         <div class="report-stat-label">Total Revenue</div>
@@ -2779,15 +3098,36 @@ async function renderClientsReport(output, controls) {
       </div>
       <div class="report-stat">
         <div class="report-stat-label">Avg per Client</div>
-        <div class="report-stat-value">${clientList.length > 0 ? fmt(totalSpent / clientList.length) : '$0'}</div>
+        <div class="report-stat-value">${totalClients > 0 ? fmt(totalSpent / totalClients) : '$0'}</div>
       </div>
     </div>
     
-    <table class="data-table">
-      <thead><tr><th style="text-align:left;">#</th><th style="text-align:left;">Client</th><th>Visits</th><th>Total Spent</th><th>Avg Ticket</th><th>Last Visit</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    ${clientList.length > 50 ? `<p style="text-align:center;color:var(--text-muted);padding:16px;">Showing top 50 of ${clientList.length} clients</p>` : ''}
+    ${totalClients === 0 ? `
+      <div class="empty-state">
+        <div class="empty-icon">👥</div>
+        <div class="empty-title">No clients found</div>
+        <div class="empty-text">${filterMonth ? 'No clients visited during this period' : 'Add client names to income entries to track them here'}</div>
+      </div>
+    ` : `
+      <table class="data-table">
+        <thead><tr>
+          <th style="text-align:left;">#</th>
+          <th style="text-align:left;">Client</th>
+          <th>Visits</th>
+          <th>Total Spent</th>
+          <th>Avg Ticket</th>
+          <th>Tips</th>
+          <th>Last Visit</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${!showAll && totalClients > 50 ? `
+        <p style="text-align:center;color:var(--text-muted);padding:16px;">
+          Showing top 50 of ${totalClients} clients. 
+          <a href="#" onclick="state.clientsReportShowAll=true;renderReport('clients');return false;" style="color:var(--plum);font-weight:600;">Show All</a>
+        </p>
+      ` : ''}
+    `}
   `;
 }
 
@@ -3423,6 +3763,75 @@ async function bootApp() {
   
   // Navigate to dashboard
   navigate('dashboard');
+}
+
+// ----------------------------------------------------------------
+// PIE CHART HELPER
+// ----------------------------------------------------------------
+
+const PIE_COLORS = [
+  '#E74C3C', '#3498DB', '#F39C12', '#9B59B6', '#1ABC9C',
+  '#E67E22', '#34495E', '#16A085', '#D35400', '#8E44AD',
+  '#27AE60', '#2980B9'
+];
+
+const _chartInstances = {};
+
+function drawPieChart(canvasId, labels, values) {
+  if (typeof Chart === 'undefined') {
+    console.warn('Chart.js not loaded');
+    return;
+  }
+  
+  if (_chartInstances[canvasId]) {
+    _chartInstances[canvasId].destroy();
+    delete _chartInstances[canvasId];
+  }
+  
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  
+  const ctx = canvas.getContext('2d');
+  
+  _chartInstances[canvasId] = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: PIE_COLORS.slice(0, values.length),
+        borderColor: '#fff',
+        borderWidth: 2,
+        hoverOffset: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      cutout: '55%',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            color: '#5C3A4A',
+            font: { size: 11, family: "'DM Sans', sans-serif" },
+            padding: 12,
+            boxWidth: 14,
+            boxHeight: 14,
+          },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+              const pct = total > 0 ? ((ctx.parsed / total) * 100).toFixed(1) : 0;
+              return ` ${ctx.label}: ${fmt(ctx.parsed)} (${pct}%)`;
+            },
+          },
+        },
+      },
+    },
+  });
 }
 
 // ----------------------------------------------------------------
