@@ -4392,56 +4392,144 @@ async function buildBusinessSnapshot() {
   ]);
   
   const now = new Date();
-  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const curYear = now.getFullYear();
+  const curMonth = now.getMonth() + 1;
+  const yearStr = String(curYear);
   
   // Monthly summaries (last 6 months)
   const monthlySummaries = [];
   for (let i = 0; i < 6; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const monthStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    let m = curMonth - i;
+    let y = curYear;
+    while (m <= 0) { m += 12; y--; }
+    const monthStr = `${y}-${String(m).padStart(2, '0')}`;
     const mTxns = txns.filter(t => t.date?.startsWith(monthStr));
-    const mMExp = mExp.filter(e => e.year === d.getFullYear() && e.month === d.getMonth() + 1);
+    const mMExp = mExp.filter(e => e.year === y && e.month === m);
     
-    const income = mTxns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const expenses = mTxns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0) + mMExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const mIncome = mTxns.filter(t => t.type === 'INCOME');
+    const services = mIncome.reduce((s, t) => s + (t.serviceAmount || 0), 0);
+    const tips = mIncome.reduce((s, t) => s + (t.tipAmount || 0), 0);
+    const dailyExp = mTxns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mMExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const rentCollected = rentPmts.filter(p => p.datePaid?.startsWith(monthStr)).reduce((s, p) => s + (p.amount || 0), 0);
+    const uniqueClients = new Set(mIncome.filter(t => t.clientName?.trim()).map(t => t.clientName.trim().toLowerCase())).size;
     
     monthlySummaries.push({
-      month: monthStr,
-      income: Math.round(income),
-      expenses: Math.round(expenses),
-      net: Math.round(income - expenses),
-      clientCount: new Set(mTxns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size
+      month: monthName(m),
+      year: y,
+      services: Math.round(services),
+      tips: Math.round(tips),
+      totalIncome: Math.round(services + tips + rentCollected),
+      dailyExpenses: Math.round(dailyExp),
+      monthlyExpenses: Math.round(monthlyExp),
+      totalExpenses: Math.round(dailyExp + monthlyExp),
+      netProfit: Math.round(services + tips + rentCollected - dailyExp - monthlyExp),
+      rentCollected: Math.round(rentCollected),
+      uniqueClients,
+      incomeEntries: mIncome.length
     });
   }
   
-  // Top clients
-  const clientTotals = {};
-  txns.filter(t => t.type === 'INCOME' && t.clientName).forEach(t => {
-    clientTotals[t.clientName] = (clientTotals[t.clientName] || 0) + (t.serviceAmount || 0) + (t.tipAmount || 0);
+  // Income by service category (YTD)
+  const incByCat = {};
+  txns.filter(t => t.date?.startsWith(yearStr) && t.type === 'INCOME').forEach(t => {
+    const cat = t.category || 'Uncategorized';
+    if (!incByCat[cat]) incByCat[cat] = { services: 0, tips: 0, count: 0 };
+    incByCat[cat].services += t.serviceAmount || 0;
+    incByCat[cat].tips += t.tipAmount || 0;
+    incByCat[cat].count++;
   });
-  const topClients = Object.entries(clientTotals)
+  const topServices = Object.entries(incByCat)
+    .map(([cat, data]) => ({ category: cat, total: data.services + data.tips, services: data.services, tips: data.tips, count: data.count }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 10);
+  
+  // Expense by category (YTD)
+  const expByCat = {};
+  txns.filter(t => t.date?.startsWith(yearStr) && t.type === 'EXPENSE').forEach(t => {
+    expByCat[t.category || 'Other'] = (expByCat[t.category || 'Other'] || 0) + (t.amount || 0);
+  });
+  mExp.filter(e => e.year === curYear).forEach(e => {
+    expByCat[e.category || 'Other'] = (expByCat[e.category || 'Other'] || 0) + (e.amount || 0);
+  });
+  const topExpenses = Object.entries(expByCat)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
-    .map(([name, total]) => ({ name, total: Math.round(total) }));
+    .map(([cat, amt]) => ({ category: cat, amount: Math.round(amt) }));
   
-  // Renter status
-  const activeRenters = renters.filter(r => r.status === 'active').map(r => {
-    const pmts = rentPmts.filter(p => p.renterId === r.id);
+  // Client details with tips
+  const clientMap = {};
+  txns.filter(t => t.type === 'INCOME' && t.clientName?.trim()).forEach(t => {
+    const key = t.clientName.trim().toLowerCase();
+    const name = t.clientName.trim();
+    if (!clientMap[key]) clientMap[key] = { name, visits: 0, services: 0, tips: 0, lastVisit: '' };
+    clientMap[key].visits++;
+    clientMap[key].services += t.serviceAmount || 0;
+    clientMap[key].tips += t.tipAmount || 0;
+    if (t.date > clientMap[key].lastVisit) clientMap[key].lastVisit = t.date;
+  });
+  const topClients = Object.values(clientMap)
+    .sort((a, b) => (b.services + b.tips) - (a.services + a.tips))
+    .slice(0, 15)
+    .map(c => ({
+      name: c.name,
+      visits: c.visits,
+      totalSpend: Math.round(c.services + c.tips),
+      tips: Math.round(c.tips),
+      avgTip: c.visits > 0 ? Math.round(c.tips / c.visits) : 0,
+      lastVisit: c.lastVisit
+    }));
+  
+  // Booth renters with payment history
+  const activeRenters = renters.filter(r => r.status === 'active');
+  const renterDetails = activeRenters.map(r => {
+    const pmts = rentPmts.filter(p => p.renterId === r.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+    const totalPaid = pmts.reduce((s, p) => s + (p.amount || 0), 0);
+    
+    // Check last 8 weeks for on-time pattern
+    let onTime = 0, late = 0, missed = 0;
+    for (let i = 0; i < 8; i++) {
+      const ws = addDays(getWeekStart(todayStr()), -(i * 7));
+      const pmt = pmts.find(p => p.weekStart === ws);
+      if (pmt) {
+        const status = getRentStatus(ws, pmt.datePaid);
+        if (status === 'ontime') onTime++;
+        else late++;
+      } else {
+        missed++;
+      }
+    }
+    
     return {
       name: r.name,
       weeklyRate: getCurrentRate(r),
-      totalPaid: pmts.reduce((s, p) => s + (p.amount || 0), 0),
-      paymentCount: pmts.length
+      totalPayments: pmts.length,
+      totalPaid: Math.round(totalPaid),
+      last8Weeks: { onTime, late, missed }
     };
   });
   
-  return JSON.stringify({
-    currentDate: todayStr(),
-    monthlySummaries,
-    topClients,
-    activeRenters,
-    totalTransactions: txns.length
-  }, null, 2);
+  // Build readable snapshot string (like mobile)
+  const snapshot = `
+BUSINESS SNAPSHOT (as of ${now.toLocaleDateString()}):
+
+MONTHLY PERFORMANCE (last 6 months):
+${monthlySummaries.map(m => `${m.month} ${m.year}: Income $${m.totalIncome} (Services $${m.services}, Tips $${m.tips}, Rent $${m.rentCollected}) | Expenses $${m.totalExpenses} | Net $${m.netProfit} | Unique clients: ${m.uniqueClients}`).join('\n')}
+
+TOP SERVICE CATEGORIES (YTD by revenue):
+${topServices.map(s => `${s.category}: $${Math.round(s.total)} (${s.count} transactions, $${Math.round(s.tips)} in tips)`).join('\n')}
+
+TOP EXPENSE CATEGORIES (YTD):
+${topExpenses.map(e => `${e.category}: $${e.amount}`).join('\n')}
+
+TOP CLIENTS (by total spend):
+${topClients.map(c => `${c.name}: ${c.visits} visits, $${c.totalSpend} total, $${c.tips} tips ($${c.avgTip} avg tip), last visit ${c.lastVisit}`).join('\n')}
+
+BOOTH RENTERS (${activeRenters.length} active):
+${renterDetails.map(r => `${r.name}: $${r.weeklyRate}/week, ${r.totalPayments} payments ($${r.totalPaid} total), last 8 weeks: ${r.last8Weeks.onTime} on-time, ${r.last8Weeks.late} late, ${r.last8Weeks.missed} missed`).join('\n') || 'None'}
+`.trim();
+
+  return snapshot;
 }
 
 // ----------------------------------------------------------------
