@@ -1633,16 +1633,24 @@ async function saveRentPayment(renterId, weekStart) {
   
   if (amount <= 0) { showToast('Please enter an amount'); return; }
   
+  // Get renter and their weekly rate
+  const renter = await db.renters.get(renterId);
+  ensureRateHistory(renter);
+  const weekRate = getRateForWeek(renter, weekStart);
+  
+  // If amount is more than 1 week's rate, offer to fill missed weeks
+  if (amount > weekRate * 1.01) {
+    openCatchUpModal(renterId, amount, datePaid, method, notes);
+    return;
+  }
+  
   // Check for existing payment
   const existing = await db.rentPayments.where('renterId').equals(renterId)
     .filter(p => p.weekStart === weekStart).first();
   
   if (existing) {
-    showToast('Payment already exists for this week');
-    return;
-  }
-  
-  try {
+    await db.rentPayments.update(existing.id, { amount, datePaid, paymentMethod: method, notes });
+  } else {
     await db.rentPayments.add({
       renterId,
       weekStart,
@@ -1651,14 +1659,185 @@ async function saveRentPayment(renterId, weekStart) {
       paymentMethod: method,
       notes
     });
+  }
+  
+  closeModal();
+  showToast('Payment logged ✓');
+  await renderRentersView();
+}
+
+async function openCatchUpModal(renterId, totalAmount, datePaid, method, notes) {
+  const r = await db.renters.get(renterId);
+  ensureRateHistory(r);
+  const allPmts = await db.rentPayments.where('renterId').equals(renterId).toArray();
+  const ws = state.rentersWeekStart || getWeekStart(todayStr());
+  
+  // Find unpaid AND underpaid weeks going back up to 16 weeks
+  const unpaidWeeks = [];
+  for (let i = 0; i < 16; i++) {
+    const weekStart = addDays(ws, -(i * 7));
+    if (r.startDate && weekStart < getWeekStart(r.startDate)) break;
     
+    const rate = getRateForWeek(r, weekStart);
+    const existingPmt = allPmts.find(p => p.weekStart === weekStart);
+    
+    if (!existingPmt) {
+      unpaidWeeks.push({ weekStart, rate, amountDue: rate, paid: 0, status: 'unpaid' });
+    } else if (existingPmt.amount < rate - 0.01) {
+      const stillOwes = rate - existingPmt.amount;
+      unpaidWeeks.push({ weekStart, rate, amountDue: stillOwes, paid: existingPmt.amount, status: 'partial' });
+    }
+  }
+  
+  if (unpaidWeeks.length === 0) {
+    // No missed weeks — just log as single payment on current week
+    await db.rentPayments.add({
+      renterId, weekStart: ws, amount: totalAmount, datePaid, paymentMethod: method, notes
+    });
     closeModal();
     showToast('Payment logged ✓');
     await renderRentersView();
-  } catch(err) {
-    console.error('Save error:', err);
-    showToast('Error saving payment');
+    return;
   }
+  
+  // Auto-select: current week first, then oldest unpaid weeks
+  let remaining = totalAmount;
+  const selections = [];
+  
+  const currentWeekEntry = unpaidWeeks.find(w => w.weekStart === ws);
+  if (currentWeekEntry && remaining >= currentWeekEntry.amountDue) {
+    selections.push(currentWeekEntry.weekStart);
+    remaining -= currentWeekEntry.amountDue;
+  }
+  
+  const oldestFirst = [...unpaidWeeks].reverse().filter(w => w.weekStart !== ws);
+  for (const week of oldestFirst) {
+    if (remaining >= week.amountDue) {
+      selections.push(week.weekStart);
+      remaining -= week.amountDue;
+    }
+  }
+  
+  // Store data for later
+  window._catchUpData = { renterId, totalAmount, datePaid, method, notes, unpaidWeeks };
+  
+  const weeksHTML = unpaidWeeks.map(w => {
+    const checked = selections.includes(w.weekStart) ? 'checked' : '';
+    const label = formatWeekRange(w.weekStart);
+    const statusLabel = w.weekStart === ws ? 'Current week'
+      : w.status === 'partial' ? `Partial — ${fmt(w.paid)} of ${fmt(w.rate)} paid`
+      : 'Unpaid';
+    return `
+      <label style="display:flex;align-items:center;gap:12px;padding:12px;background:var(--cream);border-radius:8px;margin-bottom:8px;cursor:pointer;">
+        <input type="checkbox" class="catchup-week" value="${w.weekStart}" data-rate="${w.amountDue}" ${checked}
+          onchange="updateCatchUpSummary()"
+          style="width:20px;height:20px;accent-color:var(--plum);">
+        <div style="flex:1;">
+          <div style="font-weight:500;">${label}</div>
+          <div style="font-size:12px;color:var(--text-muted);">${statusLabel}</div>
+        </div>
+        <div style="font-weight:600;">${fmt(w.amountDue)}</div>
+      </label>
+    `;
+  }).join('');
+  
+  openModal(`
+    <h2 class="modal-title">Apply Catch-Up Payment</h2>
+    <p style="color:var(--text-muted);margin-bottom:16px;">
+      Payment of <strong>${fmt(totalAmount)}</strong> exceeds weekly rate. Select weeks to apply:
+    </p>
+    
+    <div style="max-height:300px;overflow-y:auto;margin-bottom:16px;">
+      ${weeksHTML}
+    </div>
+    
+    <div id="catchup-summary" style="background:var(--cream);border-radius:8px;padding:12px;margin-bottom:16px;">
+      <!-- Updated by updateCatchUpSummary -->
+    </div>
+    
+    <button class="btn-primary" style="width:100%;" onclick="saveCatchUpPayments()">Apply Payments</button>
+  `);
+  
+  updateCatchUpSummary();
+}
+
+function updateCatchUpSummary() {
+  const data = window._catchUpData;
+  if (!data) return;
+  
+  const checks = document.querySelectorAll('.catchup-week:checked');
+  let selectedTotal = 0;
+  checks.forEach(c => { selectedTotal += parseFloat(c.dataset.rate) || 0; });
+  
+  const remainder = data.totalAmount - selectedTotal;
+  const summaryEl = document.getElementById('catchup-summary');
+  
+  if (summaryEl) {
+    summaryEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+        <span>Payment amount:</span><strong>${fmt(data.totalAmount)}</strong>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+        <span>Selected weeks (${checks.length}):</span><strong>${fmt(selectedTotal)}</strong>
+      </div>
+      <div style="display:flex;justify-content:space-between;color:${remainder > 0.01 ? 'var(--danger)' : remainder < -0.01 ? 'var(--success)' : 'var(--text)'};">
+        <span>${remainder > 0.01 ? 'Remainder (credit):' : remainder < -0.01 ? 'Short by:' : 'Balance:'}</span>
+        <strong>${fmt(Math.abs(remainder))}</strong>
+      </div>
+    `;
+  }
+}
+
+async function saveCatchUpPayments() {
+  const data = window._catchUpData;
+  if (!data) return;
+  
+  const checks = document.querySelectorAll('.catchup-week:checked');
+  if (checks.length === 0) {
+    showToast('Please select at least one week');
+    return;
+  }
+  
+  const allPmts = await db.rentPayments.where('renterId').equals(data.renterId).toArray();
+  const weekStarts = Array.from(checks).map(c => c.value);
+  
+  // Build catch-up note
+  const catchUpNote = weekStarts.length > 1 
+    ? `catch-up: ${weekStarts.length} weeks` 
+    : '';
+  const finalNotes = [data.notes, catchUpNote].filter(Boolean).join(' • ');
+  
+  // Create/update payment for each selected week
+  for (const weekStart of weekStarts) {
+    const weekData = data.unpaidWeeks.find(w => w.weekStart === weekStart);
+    if (!weekData) continue;
+    
+    const existing = allPmts.find(p => p.weekStart === weekStart);
+    const newAmount = existing ? existing.amount + weekData.amountDue : weekData.amountDue;
+    
+    if (existing) {
+      await db.rentPayments.update(existing.id, {
+        amount: newAmount,
+        datePaid: data.datePaid,
+        paymentMethod: data.method,
+        notes: finalNotes
+      });
+    } else {
+      await db.rentPayments.add({
+        renterId: data.renterId,
+        weekStart,
+        amount: weekData.amountDue,
+        datePaid: data.datePaid,
+        paymentMethod: data.method,
+        notes: finalNotes
+      });
+    }
+  }
+  
+  window._catchUpData = null;
+  closeModal();
+  showToast(`${checks.length} week${checks.length > 1 ? 's' : ''} logged ✓`);
+  await renderRentersView();
 }
 
 async function openRenterDetail(renterId) {
