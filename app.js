@@ -3771,14 +3771,23 @@ function showSettingsSection(section) {
   }
 }
 
-function renderCategoriesSettings(container) {
+async function renderCategoriesSettings(container) {
+  // Load direct cost categories
+  const directCatsDoc = await db.settings.get('directCostCategories');
+  const directCats = directCatsDoc?.value ? JSON.parse(directCatsDoc.value) : [];
+  
+  // Sort categories alphabetically
+  const sortedIncome = [...state.categories.INCOME].sort((a, b) => a.localeCompare(b));
+  const sortedExpense = [...state.categories.EXPENSE].sort((a, b) => a.localeCompare(b));
+  
   container.innerHTML = `
     <div class="settings-section">
       <div class="settings-section-title">Income Categories</div>
       <div class="category-chips" id="income-chips">
-        ${state.categories.INCOME.map((c, i) => `
-          <div class="category-chip">${c}<button class="chip-delete" onclick="deleteCategory('INCOME', ${i})">×</button></div>
-        `).join('')}
+        ${sortedIncome.map(c => {
+          const originalIndex = state.categories.INCOME.indexOf(c);
+          return `<div class="category-chip">${c}<button class="chip-delete" onclick="deleteCategory('INCOME', ${originalIndex})">×</button></div>`;
+        }).join('')}
       </div>
       <div class="add-category-row">
         <input type="text" class="add-category-input" id="add-income-cat" placeholder="New category...">
@@ -3788,10 +3797,19 @@ function renderCategoriesSettings(container) {
     
     <div class="settings-section" style="margin-top:32px;">
       <div class="settings-section-title">Expense Categories</div>
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+        <span style="background:var(--plum);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;margin-right:4px;">Direct</span> = Cost of goods sold (products, supplies used on clients)
+        <span style="background:var(--text-muted);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;margin-left:12px;margin-right:4px;">Overhead</span> = Operating expenses (rent, utilities, etc.)
+      </p>
       <div class="category-chips" id="expense-chips">
-        ${state.categories.EXPENSE.map((c, i) => `
-          <div class="category-chip">${c}<button class="chip-delete" onclick="deleteCategory('EXPENSE', ${i})">×</button></div>
-        `).join('')}
+        ${sortedExpense.map(c => {
+          const originalIndex = state.categories.EXPENSE.indexOf(c);
+          const isDirect = directCats.includes(c);
+          const badge = isDirect 
+            ? '<span style="background:var(--plum);color:#fff;padding:1px 6px;border-radius:8px;font-size:10px;margin-right:6px;">Direct</span>'
+            : '<span style="background:var(--text-muted);color:#fff;padding:1px 6px;border-radius:8px;font-size:10px;margin-right:6px;">Overhead</span>';
+          return `<div class="category-chip" style="cursor:pointer;" onclick="toggleDirectCost('${c.replace(/'/g, "\\'")}')" title="Click to toggle Direct/Overhead">${badge}${c}<button class="chip-delete" onclick="event.stopPropagation();deleteCategory('EXPENSE', ${originalIndex})">×</button></div>`;
+        }).join('')}
       </div>
       <div class="add-category-row">
         <input type="text" class="add-category-input" id="add-expense-cat" placeholder="New category...">
@@ -3799,6 +3817,22 @@ function renderCategoriesSettings(container) {
       </div>
     </div>
   `;
+}
+
+async function toggleDirectCost(category) {
+  const directCatsDoc = await db.settings.get('directCostCategories');
+  let directCats = directCatsDoc?.value ? JSON.parse(directCatsDoc.value) : [];
+  
+  if (directCats.includes(category)) {
+    directCats = directCats.filter(c => c !== category);
+    showToast(`"${category}" set to Overhead`);
+  } else {
+    directCats.push(category);
+    showToast(`"${category}" set to Direct Cost`);
+  }
+  
+  await db.settings.put({ key: 'directCostCategories', value: JSON.stringify(directCats) });
+  showSettingsSection('categories');
 }
 
 async function addCategory(type) {
