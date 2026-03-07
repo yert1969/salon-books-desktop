@@ -471,10 +471,12 @@ function getRateForWeek(renter, weekStart) {
 
 function getRentStatus(weekStart, datePaid) {
   if (!datePaid) return 'unpaid';
+  // Due date is Saturday (5 days after Monday week start)
+  // "On time" = paid by Tuesday after due date (Saturday + 3 days = 8 days after Monday)
   const ws = new Date(weekStart + 'T12:00:00');
   const pd = new Date(datePaid + 'T12:00:00');
   const days = Math.floor((pd - ws) / 86400000);
-  return days <= 2 ? 'ontime' : 'late';
+  return days <= 8 ? 'ontime' : 'late';  // Saturday (5) + 3 grace days = 8
 }
 
 async function updateRentersTabVisibility() {
