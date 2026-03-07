@@ -1476,7 +1476,8 @@ html, body {
   display: flex;
   justify-content: center;
   padding: 20px 0;
-  max-width: 300px;
+  max-width: 350px;
+  min-height: 400px;
   margin: 0 auto;
 }
 

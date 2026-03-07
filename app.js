@@ -752,11 +752,22 @@ async function generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts) 
   const filtered = insights.filter(i => !wasRecentlyShown(i.key));
   filtered.sort((a, b) => b.priority - a.priority);
   
-  // Take 2-3 insights
-  const selected = filtered.slice(0, Math.min(3, Math.max(2, filtered.length)));
+  // If all insights were recently shown, pick 1-2 random ones anyway (better than nothing)
+  let selected;
+  if (filtered.length === 0 && insights.length > 0) {
+    // Shuffle and pick 1-2
+    const shuffled = [...insights].sort(() => Math.random() - 0.5);
+    selected = shuffled.slice(0, 2);
+    console.log('All insights recently shown, picking random:', selected.map(i => i.key));
+  } else {
+    // Take 2-3 insights
+    selected = filtered.slice(0, Math.min(3, Math.max(2, filtered.length)));
+  }
   
   // Mark as shown
   selected.forEach(i => markInsightShown(i.key));
+  
+  console.log(`Smart Insights: ${insights.length} generated, ${filtered.length} not recently shown, ${selected.length} selected`);
   
   return selected;
 }
@@ -4672,7 +4683,7 @@ function drawPieChart(canvasId, labels, values) {
   const ctx = canvas.getContext('2d');
   
   _chartInstances[canvasId] = new Chart(ctx, {
-    type: 'doughnut',
+    type: 'pie',
     data: {
       labels,
       datasets: [{
@@ -4686,16 +4697,15 @@ function drawPieChart(canvasId, labels, values) {
     options: {
       responsive: true,
       maintainAspectRatio: true,
-      cutout: '55%',
       plugins: {
         legend: {
           position: 'bottom',
           labels: {
             color: '#5C3A4A',
             font: { size: 11, family: "'DM Sans', sans-serif" },
-            padding: 12,
-            boxWidth: 14,
-            boxHeight: 14,
+            padding: 10,
+            boxWidth: 12,
+            boxHeight: 12,
           },
         },
         tooltip: {
