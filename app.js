@@ -491,7 +491,278 @@ async function updateRentersTabVisibility() {
 
 
 // ----------------------------------------------------------------
-// 10. DASHBOARD VIEW
+// 10. SMART INSIGHTS ENGINE
+// ----------------------------------------------------------------
+
+// Track shown insights to avoid repetition (stored in localStorage)
+function getShownInsights() {
+  try {
+    const data = JSON.parse(localStorage.getItem('mf_shown_insights') || '{}');
+    // Clean up entries older than 3 days
+    const now = Date.now();
+    const cleaned = {};
+    Object.entries(data).forEach(([key, timestamp]) => {
+      if (now - timestamp < 3 * 24 * 60 * 60 * 1000) cleaned[key] = timestamp;
+    });
+    return cleaned;
+  } catch { return {}; }
+}
+
+function markInsightShown(key) {
+  const data = getShownInsights();
+  data[key] = Date.now();
+  localStorage.setItem('mf_shown_insights', JSON.stringify(data));
+}
+
+function wasRecentlyShown(key) {
+  const data = getShownInsights();
+  if (!data[key]) return false;
+  // Consider "recent" as within last 24 hours
+  return Date.now() - data[key] < 24 * 60 * 60 * 1000;
+}
+
+async function generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts) {
+  const insights = [];
+  const now = new Date();
+  const today = todayStr();
+  const dayOfWeek = now.getDay(); // 0=Sun, 6=Sat
+  const dayOfMonth = now.getDate();
+  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const lastMonth = `${now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear()}-${String(now.getMonth() === 0 ? 12 : now.getMonth()).padStart(2, '0')}`;
+  const thisYear = String(now.getFullYear());
+  const lastYear = String(now.getFullYear() - 1);
+  
+  // Helper to calculate income for a period
+  const incomeFor = (txns) => txns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
+  const expenseFor = (txns, mExp) => {
+    const daily = txns.filter(t => t.type === 'EXPENSE').reduce((s,t) => s + (t.amount||0), 0);
+    const monthly = mExp.reduce((s,e) => s + (e.amount||0), 0);
+    return daily + monthly;
+  };
+  
+  // This month vs last month pace
+  const thisMonthTxns = allTxns.filter(t => t.date?.startsWith(thisMonth));
+  const lastMonthTxns = allTxns.filter(t => t.date?.startsWith(lastMonth));
+  const thisMonthIncome = incomeFor(thisMonthTxns);
+  const lastMonthIncome = incomeFor(lastMonthTxns);
+  
+  // Same point last month comparison
+  const lastMonthSameDay = `${lastMonth}-${String(dayOfMonth).padStart(2, '0')}`;
+  const lastMonthToDate = allTxns.filter(t => t.date?.startsWith(lastMonth) && t.date <= lastMonthSameDay);
+  const lastMonthPace = incomeFor(lastMonthToDate);
+  
+  if (lastMonthPace > 0 && dayOfMonth >= 5) {
+    const paceChange = Math.round(((thisMonthIncome - lastMonthPace) / lastMonthPace) * 100);
+    if (Math.abs(paceChange) >= 10) {
+      const key = `pace_${thisMonth}`;
+      insights.push({
+        key,
+        priority: Math.abs(paceChange) >= 20 ? 95 : 70,
+        icon: paceChange > 0 ? '📈' : '📉',
+        type: paceChange > 0 ? 'success' : 'warning',
+        text: paceChange > 0 
+          ? `You're ${paceChange}% ahead of last month's pace! Keep it up.`
+          : `Income is ${Math.abs(paceChange)}% behind last month's pace. ${7 - dayOfWeek} days left this week to catch up.`
+      });
+    }
+  }
+  
+  // Yesterday was exceptional
+  const yesterday = addDays(today, -1);
+  const yesterdayIncome = incomeFor(allTxns.filter(t => t.date === yesterday));
+  const thisMonthDays = thisMonthTxns.reduce((acc, t) => {
+    if (!acc[t.date]) acc[t.date] = 0;
+    if (t.type === 'INCOME') acc[t.date] += (t.serviceAmount||0) + (t.tipAmount||0);
+    return acc;
+  }, {});
+  const dailyIncomes = Object.values(thisMonthDays);
+  const avgDaily = dailyIncomes.length > 0 ? dailyIncomes.reduce((a,b) => a+b, 0) / dailyIncomes.length : 0;
+  
+  if (yesterdayIncome > avgDaily * 1.5 && yesterdayIncome > 200) {
+    const key = `best_day_${yesterday}`;
+    insights.push({
+      key,
+      priority: 85,
+      icon: '🌟',
+      type: 'success',
+      text: `Yesterday (${fmt(yesterdayIncome)}) was ${Math.round((yesterdayIncome/avgDaily - 1) * 100)}% above your daily average!`
+    });
+  }
+  
+  // Clients who haven't visited in a while
+  const clientLastVisit = {};
+  allTxns.filter(t => t.type === 'INCOME' && t.clientName).forEach(t => {
+    const name = t.clientName.trim();
+    if (!clientLastVisit[name] || t.date > clientLastVisit[name]) {
+      clientLastVisit[name] = t.date;
+    }
+  });
+  const overdueClients = Object.entries(clientLastVisit).filter(([name, lastVisit]) => {
+    const days = Math.floor((new Date(today) - new Date(lastVisit)) / 86400000);
+    return days >= 45 && days <= 90;
+  });
+  
+  if (overdueClients.length > 0) {
+    const key = `overdue_clients_${thisMonth}`;
+    insights.push({
+      key,
+      priority: overdueClients.length >= 5 ? 80 : 60,
+      icon: '👋',
+      type: 'info',
+      text: `${overdueClients.length} regular client${overdueClients.length > 1 ? 's haven\'t' : ' hasn\'t'} visited in 45+ days. A quick text could bring them back!`
+    });
+  }
+  
+  // Booth rent outstanding
+  const activeRenters = allRenters.filter(r => r.status === 'active');
+  if (activeRenters.length > 0) {
+    const currentWS = getWeekStart(today);
+    const lastWS = addDays(currentWS, -7);
+    let outstanding = 0;
+    let overdueCount = 0;
+    
+    activeRenters.forEach(r => {
+      ensureRateHistory(r);
+      const rate = getRateForWeek(r, lastWS);
+      const pmt = allRentPmts.find(p => p.renterId === r.id && p.weekStart === lastWS);
+      if (!pmt || pmt.amount < rate) {
+        outstanding += rate - (pmt?.amount || 0);
+        overdueCount++;
+      }
+    });
+    
+    if (overdueCount > 0) {
+      const key = `rent_overdue_${lastWS}`;
+      insights.push({
+        key,
+        priority: 90,
+        icon: '🏠',
+        type: 'warning',
+        text: `${overdueCount} booth renter${overdueCount > 1 ? 's are' : ' is'} behind on last week's rent (${fmt(outstanding)} outstanding).`
+      });
+    }
+  }
+  
+  // Week comparison (show mid-week)
+  if (dayOfWeek >= 3 && dayOfWeek <= 5) {
+    const thisWeekStart = getWeekStart(today);
+    const lastWeekStart = addDays(thisWeekStart, -7);
+    const thisWeekIncome = incomeFor(allTxns.filter(t => t.date >= thisWeekStart && t.date <= today));
+    const lastWeekSamePoint = incomeFor(allTxns.filter(t => t.date >= lastWeekStart && t.date < addDays(lastWeekStart, dayOfWeek)));
+    
+    if (lastWeekSamePoint > 0) {
+      const weekChange = Math.round(((thisWeekIncome - lastWeekSamePoint) / lastWeekSamePoint) * 100);
+      if (Math.abs(weekChange) >= 15) {
+        const key = `week_pace_${thisWeekStart}`;
+        insights.push({
+          key,
+          priority: 65,
+          icon: weekChange > 0 ? '💪' : '⚡',
+          type: weekChange > 0 ? 'success' : 'info',
+          text: weekChange > 0 
+            ? `This week is ${weekChange}% ahead of last week so far (${fmt(thisWeekIncome)} vs ${fmt(lastWeekSamePoint)}).`
+            : `This week is running ${Math.abs(weekChange)}% behind last week. ${6 - dayOfWeek} days to catch up!`
+        });
+      }
+    }
+  }
+  
+  // YTD milestone
+  const ytdIncome = incomeFor(allTxns.filter(t => t.date?.startsWith(thisYear)));
+  const milestones = [10000, 25000, 50000, 75000, 100000, 150000, 200000];
+  const lastMilestone = milestones.filter(m => ytdIncome >= m).pop();
+  const nextMilestone = milestones.find(m => ytdIncome < m);
+  
+  if (lastMilestone && ytdIncome < lastMilestone * 1.05) {
+    const key = `milestone_${lastMilestone}_${thisYear}`;
+    insights.push({
+      key,
+      priority: 88,
+      icon: '🎉',
+      type: 'success',
+      text: `You just passed ${fmt(lastMilestone)} in income this year! ${nextMilestone ? `Next milestone: ${fmt(nextMilestone)}` : ''}`
+    });
+  }
+  
+  // YoY comparison (good for end of month)
+  if (dayOfMonth >= 25) {
+    const lastYearSameMonth = `${now.getFullYear() - 1}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const lastYearIncome = incomeFor(allTxns.filter(t => t.date?.startsWith(lastYearSameMonth)));
+    
+    if (lastYearIncome > 0) {
+      const yoyChange = Math.round(((thisMonthIncome - lastYearIncome) / lastYearIncome) * 100);
+      if (Math.abs(yoyChange) >= 10) {
+        const key = `yoy_${thisMonth}`;
+        insights.push({
+          key,
+          priority: 75,
+          icon: yoyChange > 0 ? '📊' : '📉',
+          type: yoyChange > 0 ? 'success' : 'info',
+          text: yoyChange > 0
+            ? `This ${monthName(now.getMonth() + 1)} is ${yoyChange}% better than last year!`
+            : `This ${monthName(now.getMonth() + 1)} is ${Math.abs(yoyChange)}% behind last year. ${30 - dayOfMonth} days left.`
+        });
+      }
+    }
+  }
+  
+  // Slowest day of week pattern
+  const dayTotals = [0,0,0,0,0,0,0];
+  const dayCounts = [0,0,0,0,0,0,0];
+  allTxns.filter(t => t.type === 'INCOME' && t.date >= addDays(today, -60)).forEach(t => {
+    const d = new Date(t.date + 'T12:00:00').getDay();
+    dayTotals[d] += (t.serviceAmount||0) + (t.tipAmount||0);
+    dayCounts[d]++;
+  });
+  const dayAvgs = dayTotals.map((total, i) => dayCounts[i] > 0 ? total / dayCounts[i] : 0);
+  const overallAvg = dayAvgs.filter(a => a > 0).reduce((a,b) => a+b, 0) / dayAvgs.filter(a => a > 0).length || 0;
+  const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  
+  const slowestDay = dayAvgs.reduce((min, avg, i) => avg > 0 && avg < min.avg ? {day: i, avg} : min, {day: -1, avg: Infinity});
+  if (slowestDay.day >= 0 && slowestDay.avg < overallAvg * 0.6 && overallAvg > 0) {
+    const key = `slow_day_pattern`;
+    insights.push({
+      key,
+      priority: 50,
+      icon: '💡',
+      type: 'info',
+      text: `${dayNames[slowestDay.day]}s tend to be slow (${Math.round((1 - slowestDay.avg/overallAvg) * 100)}% below average). Consider a mid-week promo?`
+    });
+  }
+  
+  // Top client shoutout (occasional)
+  const clientTotals = {};
+  allTxns.filter(t => t.type === 'INCOME' && t.clientName && t.date >= addDays(today, -90)).forEach(t => {
+    const name = t.clientName.trim();
+    clientTotals[name] = (clientTotals[name] || 0) + (t.serviceAmount||0) + (t.tipAmount||0);
+  });
+  const topClient = Object.entries(clientTotals).sort((a,b) => b[1] - a[1])[0];
+  if (topClient && topClient[1] > 500) {
+    const key = `top_client_${thisMonth}`;
+    insights.push({
+      key,
+      priority: 40,
+      icon: '⭐',
+      type: 'info',
+      text: `${topClient[0]} is your top client this quarter (${fmt(topClient[1])}). VIP treatment pays off!`
+    });
+  }
+  
+  // Filter out recently shown, sort by priority, take top 2-3
+  const filtered = insights.filter(i => !wasRecentlyShown(i.key));
+  filtered.sort((a, b) => b.priority - a.priority);
+  
+  // Take 2-3 insights
+  const selected = filtered.slice(0, Math.min(3, Math.max(2, filtered.length)));
+  
+  // Mark as shown
+  selected.forEach(i => markInsightShown(i.key));
+  
+  return selected;
+}
+
+// ----------------------------------------------------------------
+// 11. DASHBOARD VIEW
 // ----------------------------------------------------------------
 
 async function renderDashboard() {
@@ -574,6 +845,39 @@ async function renderDashboard() {
   });
   const rentOutstanding = Math.max(0, rentExpected - rentCollected);
   
+  // Generate smart insights (only on current month view)
+  let insightsHTML = '';
+  if (isCurrentMonth) {
+    const insights = await generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts);
+    if (insights.length > 0) {
+      const insightItems = insights.map(i => {
+        const bgColor = i.type === 'success' ? 'rgba(46, 125, 50, 0.08)' 
+          : i.type === 'warning' ? 'rgba(230, 126, 34, 0.08)' 
+          : 'rgba(92, 61, 78, 0.06)';
+        const borderColor = i.type === 'success' ? 'var(--success)' 
+          : i.type === 'warning' ? 'var(--gold-dark)' 
+          : 'var(--plum)';
+        return `
+          <div style="display:flex;gap:12px;padding:12px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:0 8px 8px 0;">
+            <span style="font-size:20px;">${i.icon}</span>
+            <span style="font-size:14px;line-height:1.5;color:var(--text);">${i.text}</span>
+          </div>
+        `;
+      }).join('');
+      
+      insightsHTML = `
+        <div class="card" style="margin-bottom:24px;">
+          <div class="card-title" style="margin-bottom:16px;display:flex;align-items:center;gap:8px;">
+            <span>✨</span> Smart Insights
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            ${insightItems}
+          </div>
+        </div>
+      `;
+    }
+  }
+  
   // Build HTML
   let html = `
     <!-- Month Navigation -->
@@ -584,6 +888,8 @@ async function renderDashboard() {
       </h2>
       <button class="btn-icon" onclick="dashboardNav(1)" ${isCurrentMonth ? 'disabled style="opacity:0.3"' : ''}>›</button>
     </div>
+    
+    ${insightsHTML}
     
     <!-- Key Stats -->
     <div class="grid-4" style="margin-bottom:24px;">
@@ -3413,6 +3719,7 @@ async function renderSettingsView() {
         <button class="settings-nav-item" onclick="showSettingsSection('categories')">Categories</button>
         <button class="settings-nav-item" onclick="showSettingsSection('security')">Security</button>
         <button class="settings-nav-item" onclick="showSettingsSection('data')">Data & Backup</button>
+        <button class="settings-nav-item" onclick="showSettingsSection('usage')">API Usage</button>
       </div>
       
       <div class="settings-content" id="settings-section">
@@ -3459,6 +3766,8 @@ function showSettingsSection(section) {
     renderSecuritySettings(container);
   } else if (section === 'data') {
     renderDataSettings(container);
+  } else if (section === 'usage') {
+    renderUsageSettings(container);
   }
 }
 
@@ -3735,13 +4044,269 @@ async function saveSetting(key, value) {
 }
 
 // ----------------------------------------------------------------
+// API USAGE TRACKING
+// ----------------------------------------------------------------
+
+// Cost estimates per API call (approximate)
+const API_COSTS = {
+  'anthropic-sonnet': 0.015,      // ~$0.015 per 1K tokens, avg response ~1K
+  'anthropic-search': 0.025,      // Sonnet + web search
+  'firebase-function': 0.0000004, // ~$0.40 per million invocations
+  'firestore-read': 0.000036,     // $0.036 per 100K reads
+  'firestore-write': 0.00018,     // $0.18 per 100K writes
+};
+
+function getUsageLog() {
+  try {
+    return JSON.parse(localStorage.getItem('mf_api_usage') || '[]');
+  } catch { return []; }
+}
+
+function logApiUsage(type, details = {}) {
+  const log = getUsageLog();
+  log.push({
+    type,
+    timestamp: new Date().toISOString(),
+    cost: API_COSTS[type] || 0,
+    ...details
+  });
+  // Keep last 1000 entries
+  if (log.length > 1000) log.splice(0, log.length - 1000);
+  localStorage.setItem('mf_api_usage', JSON.stringify(log));
+}
+
+function getUsageStats() {
+  const log = getUsageLog();
+  const now = new Date();
+  const today = todayStr();
+  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const lastMonth = `${now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear()}-${String(now.getMonth() === 0 ? 12 : now.getMonth()).padStart(2, '0')}`;
+  
+  const stats = {
+    today: { calls: 0, cost: 0 },
+    thisMonth: { calls: 0, cost: 0 },
+    lastMonth: { calls: 0, cost: 0 },
+    allTime: { calls: log.length, cost: 0 },
+    byType: {}
+  };
+  
+  log.forEach(entry => {
+    const date = entry.timestamp?.substring(0, 10) || '';
+    const month = entry.timestamp?.substring(0, 7) || '';
+    const cost = entry.cost || 0;
+    
+    stats.allTime.cost += cost;
+    
+    if (date === today) {
+      stats.today.calls++;
+      stats.today.cost += cost;
+    }
+    if (month === thisMonth) {
+      stats.thisMonth.calls++;
+      stats.thisMonth.cost += cost;
+    }
+    if (month === lastMonth) {
+      stats.lastMonth.calls++;
+      stats.lastMonth.cost += cost;
+    }
+    
+    // By type breakdown
+    if (!stats.byType[entry.type]) {
+      stats.byType[entry.type] = { calls: 0, cost: 0 };
+    }
+    stats.byType[entry.type].calls++;
+    stats.byType[entry.type].cost += cost;
+  });
+  
+  return stats;
+}
+
+function getRecentUsage(limit = 20) {
+  const log = getUsageLog();
+  return log.slice(-limit).reverse();
+}
+
+function clearUsageLog() {
+  localStorage.removeItem('mf_api_usage');
+  showToast('Usage log cleared');
+  showSettingsSection('usage');
+}
+
+function renderUsageSettings(container) {
+  const stats = getUsageStats();
+  const recent = getRecentUsage(15);
+  
+  const formatCost = (cost) => cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
+  
+  const typeLabels = {
+    'anthropic-sonnet': 'AI Query',
+    'anthropic-search': 'AI Query + Search',
+    'firebase-function': 'Cloud Function',
+    'firestore-read': 'Database Read',
+    'firestore-write': 'Database Write'
+  };
+  
+  const byTypeRows = Object.entries(stats.byType)
+    .sort((a, b) => b[1].cost - a[1].cost)
+    .map(([type, data]) => `
+      <tr>
+        <td style="text-align:left;">${typeLabels[type] || type}</td>
+        <td style="text-align:center;">${data.calls}</td>
+        <td style="text-align:right;">${formatCost(data.cost)}</td>
+      </tr>
+    `).join('');
+  
+  const recentRows = recent.map(entry => {
+    const time = new Date(entry.timestamp);
+    const timeStr = time.toLocaleDateString() + ' ' + time.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    return `
+      <tr>
+        <td style="text-align:left;font-size:12px;color:var(--text-muted);">${timeStr}</td>
+        <td style="text-align:left;">${typeLabels[entry.type] || entry.type}</td>
+        <td style="text-align:right;">${formatCost(entry.cost)}</td>
+      </tr>
+    `;
+  }).join('');
+  
+  container.innerHTML = `
+    <div class="settings-section">
+      <div class="settings-section-title">API Usage & Costs</div>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">
+        Estimated costs based on typical usage. Actual costs may vary slightly. 
+        Check <a href="https://console.anthropic.com" target="_blank" style="color:var(--plum);">Anthropic Console</a> 
+        and <a href="https://console.firebase.google.com" target="_blank" style="color:var(--plum);">Firebase Console</a> for exact billing.
+      </p>
+      
+      <div class="grid-4" style="margin-bottom:24px;">
+        <div class="stat-card">
+          <div class="stat-label">Today</div>
+          <div class="stat-value">${stats.today.calls}</div>
+          <div style="font-size:12px;color:var(--text-muted);">${formatCost(stats.today.cost)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">This Month</div>
+          <div class="stat-value">${stats.thisMonth.calls}</div>
+          <div style="font-size:12px;color:var(--text-muted);">${formatCost(stats.thisMonth.cost)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Last Month</div>
+          <div class="stat-value">${stats.lastMonth.calls}</div>
+          <div style="font-size:12px;color:var(--text-muted);">${formatCost(stats.lastMonth.cost)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">All Time</div>
+          <div class="stat-value">${stats.allTime.calls}</div>
+          <div style="font-size:12px;color:var(--text-muted);">${formatCost(stats.allTime.cost)}</div>
+        </div>
+      </div>
+      
+      ${Object.keys(stats.byType).length > 0 ? `
+        <div class="settings-section-title" style="margin-top:24px;">Cost Breakdown by Type</div>
+        <table class="data-table" style="margin-bottom:24px;">
+          <thead>
+            <tr><th style="text-align:left;">Type</th><th style="text-align:center;">Calls</th><th style="text-align:right;">Est. Cost</th></tr>
+          </thead>
+          <tbody>${byTypeRows}</tbody>
+        </table>
+      ` : ''}
+      
+      ${recent.length > 0 ? `
+        <div class="settings-section-title" style="margin-top:24px;">Recent Activity</div>
+        <table class="data-table" style="margin-bottom:24px;">
+          <thead>
+            <tr><th style="text-align:left;">Time</th><th style="text-align:left;">Type</th><th style="text-align:right;">Est. Cost</th></tr>
+          </thead>
+          <tbody>${recentRows}</tbody>
+        </table>
+      ` : '<p style="color:var(--text-muted);">No API usage recorded yet.</p>'}
+      
+      <div style="margin-top:24px;padding-top:20px;border-top:1px solid var(--border);">
+        <button class="btn-secondary" onclick="clearUsageLog()" style="color:var(--danger);">Clear Usage Log</button>
+      </div>
+    </div>
+  `;
+}
+
+// ----------------------------------------------------------------
 // 18. AI ASK OVERLAY
 // ----------------------------------------------------------------
 
 window._aiChatHistory = [];
 
+// Pool of AI suggestion prompts - rotates randomly each time overlay opens
+const AI_SUGGESTIONS = [
+  // Business performance
+  "How did I do last month?",
+  "How's my business doing this year compared to last year?",
+  "What was my best month this year?",
+  "Am I making more or less than last quarter?",
+  "What's my average daily income?",
+  
+  // Clients
+  "Who are my top clients?",
+  "Which clients haven't visited in a while?",
+  "Who tips the best?",
+  "How many new clients did I get this month?",
+  "What's my average ticket per client?",
+  
+  // Services & Categories
+  "What's my most profitable service?",
+  "Which services bring in the most revenue?",
+  "What categories am I spending the most on?",
+  "Where are my biggest expenses?",
+  
+  // Booth rent
+  "Show me my booth rent collection status",
+  "Are any booth renters behind on payments?",
+  "How much booth rent have I collected this year?",
+  "Which renter pays most consistently on time?",
+  
+  // Trends & insights
+  "What should I focus on to grow revenue?",
+  "What trends do you see in my business?",
+  "How can I reduce my expenses?",
+  "What day of the week is my busiest?",
+  
+  // Industry comparisons (will trigger web search)
+  "How does my income compare to other salons?",
+  "What's the average booth rent rate in my area?",
+  "What do other stylists charge for balayage?",
+  "What's a typical profit margin for a salon?",
+  "How much should I be saving for taxes?",
+  
+  // Planning & advice
+  "Should I raise my prices?",
+  "When should I take my next vacation based on slow periods?",
+  "What marketing ideas might help grow my client base?",
+  "How do I encourage more repeat visits?",
+];
+
+function getRandomSuggestions(count = 4) {
+  const shuffled = [...AI_SUGGESTIONS].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, count);
+}
+
 function openAskOverlay() {
-  document.getElementById('ai-ask-overlay').classList.remove('hidden');
+  const overlay = document.getElementById('ai-ask-overlay');
+  overlay.classList.remove('hidden');
+  
+  // Reset chat on open
+  window._aiChatHistory = [];
+  
+  // Generate random suggestions
+  const suggestions = getRandomSuggestions(4);
+  const suggestionsHTML = suggestions.map(s => 
+    `<button class="ai-suggestion" onclick="askSuggestion(this)">${s}</button>`
+  ).join('');
+  
+  // Reset messages with new suggestions
+  document.getElementById('ai-chat-messages').innerHTML = `
+    <div class="ai-welcome">
+      <p>Ask me anything about your business! For example:</p>
+      <div class="ai-suggestions">${suggestionsHTML}</div>
+    </div>
+  `;
+  
   document.getElementById('ai-ask-input').focus();
 }
 
@@ -3793,7 +4358,10 @@ async function sendAskQuery() {
       history: window._aiChatHistory
     });
     
+    // Log usage (estimate - includes search if answer mentions external data)
     const answer = result.data?.answer || 'Sorry, I could not process that question.';
+    const usedSearch = answer.includes('industry') || answer.includes('According to') || answer.includes('average') && question.toLowerCase().includes('compare');
+    logApiUsage(usedSearch ? 'anthropic-search' : 'anthropic-sonnet', { question: question.substring(0, 50) });
     
     // Add to history
     window._aiChatHistory.push({ role: 'assistant', content: answer });
