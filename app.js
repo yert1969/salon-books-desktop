@@ -4342,29 +4342,36 @@ async function sendAskQuery() {
     let snapshot = null;
     if (window._aiChatHistory.length === 0) {
       snapshot = await buildBusinessSnapshot();
+      console.log('Snapshot built:', snapshot ? snapshot.substring(0, 200) + '...' : 'null');
     }
     
-    // Add to history
-    window._aiChatHistory.push({ role: 'user', content: question });
-    if (window._aiChatHistory.length > 10) {
-      window._aiChatHistory = window._aiChatHistory.slice(-10);
-    }
+    // Store current history length to check if this is first message
+    const isFirstMessage = window._aiChatHistory.length === 0;
     
-    // Call the AI function
+    // Call the AI function - pass history WITHOUT current message
+    // (current message is passed as 'question')
     const askAI = firebase.functions().httpsCallable('askAI');
     const result = await askAI({
       question,
       snapshot,
-      history: window._aiChatHistory
+      history: [...window._aiChatHistory] // Pass copy of history before adding current message
     });
+    
+    // NOW add to history after the call
+    window._aiChatHistory.push({ role: 'user', content: question });
     
     // Log usage (estimate - includes search if answer mentions external data)
     const answer = result.data?.answer || 'Sorry, I could not process that question.';
     const usedSearch = answer.includes('industry') || answer.includes('According to') || answer.includes('average') && question.toLowerCase().includes('compare');
     logApiUsage(usedSearch ? 'anthropic-search' : 'anthropic-sonnet', { question: question.substring(0, 50) });
     
-    // Add to history
+    // Add assistant response to history
     window._aiChatHistory.push({ role: 'assistant', content: answer });
+    
+    // Trim history if too long
+    if (window._aiChatHistory.length > 10) {
+      window._aiChatHistory = window._aiChatHistory.slice(-10);
+    }
     
     // Replace loading with answer
     document.getElementById(loadingId).innerHTML = answer.replace(/\n/g, '<br>');
@@ -4428,13 +4435,13 @@ async function buildBusinessSnapshot() {
     };
   });
   
-  return {
+  return JSON.stringify({
     currentDate: todayStr(),
     monthlySummaries,
     topClients,
     activeRenters,
     totalTransactions: txns.length
-  };
+  }, null, 2);
 }
 
 // ----------------------------------------------------------------
