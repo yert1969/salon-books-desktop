@@ -2301,3 +2301,292 @@ html, body {
     padding: 24px;
   }
 }
+
+/* ============================================================
+   ANIMATIONS & TRANSITIONS
+   ============================================================ */
+
+/* Base transition for interactive elements */
+.btn-primary,
+.btn-secondary,
+.btn-icon,
+.nav-item,
+.settings-nav-item,
+.category-chip,
+.client-card,
+.renter-card,
+.stat-card,
+.card,
+.data-table tbody tr,
+.form-input,
+.form-select,
+.toggle-slider {
+  transition: all 0.2s ease;
+}
+
+/* Card hover effects */
+.stat-card:hover,
+.client-card:hover,
+.renter-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(92, 61, 78, 0.12);
+}
+
+.card:hover {
+  box-shadow: 0 4px 16px rgba(92, 61, 78, 0.08);
+}
+
+/* Button hover effects */
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(92, 61, 78, 0.25);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(92, 61, 78, 0.2);
+}
+
+.btn-secondary:hover {
+  background: var(--cream-dark);
+  transform: translateY(-1px);
+}
+
+.btn-icon:hover {
+  background: var(--cream-dark);
+  transform: scale(1.05);
+}
+
+.btn-icon:active {
+  transform: scale(0.98);
+}
+
+/* Navigation hover */
+.nav-item {
+  position: relative;
+}
+
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%) scaleY(0);
+  width: 3px;
+  height: 24px;
+  background: var(--gold);
+  border-radius: 0 3px 3px 0;
+  transition: transform 0.2s ease;
+}
+
+.nav-item:hover::before {
+  transform: translateY(-50%) scaleY(1);
+}
+
+.nav-item.active::before {
+  transform: translateY(-50%) scaleY(1);
+  background: var(--plum);
+}
+
+/* Table row hover */
+.data-table tbody tr:hover {
+  background: rgba(196, 149, 106, 0.06);
+}
+
+/* Form focus effects */
+.form-input:focus,
+.form-select:focus {
+  border-color: var(--plum);
+  box-shadow: 0 0 0 3px rgba(92, 61, 78, 0.1);
+  outline: none;
+}
+
+/* Category chip hover */
+.category-chip:hover {
+  background: var(--cream-dark);
+  transform: translateY(-1px);
+}
+
+/* Modal animation */
+.modal-overlay {
+  animation: fadeIn 0.2s ease;
+}
+
+.modal {
+  animation: slideUp 0.25s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { 
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* AI Overlay animation */
+.ai-overlay {
+  animation: slideInRight 0.3s ease;
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Toast animation */
+.toast {
+  animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toastOut {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+}
+
+/* Content fade in on view change */
+#app-content {
+  animation: contentFade 0.25s ease;
+}
+
+@keyframes contentFade {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+/* Stat value subtle pop */
+.stat-value {
+  animation: statPop 0.4s ease;
+}
+
+@keyframes statPop {
+  0% { 
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  60% {
+    transform: scale(1.02);
+  }
+  100% { 
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Loading spinner smooth rotation */
+.loading-spinner {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Skeleton loading pulse */
+.skeleton {
+  background: linear-gradient(90deg, var(--cream) 25%, var(--cream-dark) 50%, var(--cream) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Smart Insights card entrance */
+.card:has(.card-title) {
+  animation: cardEnter 0.35s ease;
+}
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Toggle switch animation */
+.toggle input:checked + .toggle-slider {
+  transition: background-color 0.25s ease;
+}
+
+.toggle-slider::before {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Chip delete button */
+.chip-delete {
+  transition: all 0.15s ease;
+}
+
+.chip-delete:hover {
+  transform: scale(1.2);
+  color: var(--danger);
+}
+
+/* Report tabs */
+.report-tabs button {
+  transition: all 0.2s ease;
+}
+
+.report-tabs button:hover:not(.active) {
+  background: var(--cream-dark);
+}
+
+/* Settings nav items */
+.settings-nav-item {
+  transition: all 0.2s ease;
+}
+
+.settings-nav-item:hover:not(.active) {
+  background: var(--cream-dark);
+  padding-left: 20px;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
