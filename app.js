@@ -4498,6 +4498,17 @@ async function renderDataSettings(container) {
         <input type="file" id="import-file" accept=".json" style="display:none;" onchange="importBackup(this.files[0])">
       </div>
       
+      <div id="vagaro-migration-section" style="border-top:1px solid var(--border);padding-top:20px;margin-top:20px;">
+        <div class="settings-section-title" style="margin-bottom:12px;">Data Migration</div>
+        <div class="settings-item" style="align-items:flex-start;flex-direction:column;gap:12px;">
+          <div>
+            <div class="settings-item-label">Vagaro Income — Employee Field Migration</div>
+            <div class="settings-item-sub">Converts old <code>Chasity (Vagaro Income)</code> transactions to the new format with a separate <code>employee</code> field. A backup is downloaded before any changes are made.</div>
+          </div>
+          <button class="btn-secondary" onclick="migrateVagaroIncome()">Preview Migration</button>
+        </div>
+      </div>
+
       <div class="settings-item" style="border-top:2px solid var(--danger-bg);padding-top:20px;margin-top:20px;">
         <div>
           <div class="settings-item-label" style="color:var(--danger);">Clear All Data</div>
@@ -4507,6 +4518,129 @@ async function renderDataSettings(container) {
       </div>
     </div>
   `;
+}
+
+async function migrateVagaroIncome() {
+  const OLD_CATEGORY = 'Chasity (Vagaro Income)';
+  const NEW_CATEGORY = 'Vagaro Income';
+  const EMPLOYEE_NAME = 'Chasity McGill';
+
+  // Find affected transactions
+  let affected;
+  try {
+    affected = await db.transactions.where('category').equals(OLD_CATEGORY).toArray();
+  } catch(err) {
+    showToast('Error scanning transactions');
+    console.error(err);
+    return;
+  }
+
+  if (affected.length === 0) {
+    openModal(`
+      <h2 class="modal-title">Nothing to Migrate</h2>
+      <p style="margin-bottom:24px;color:var(--text);line-height:1.6;">No transactions found with category <strong>${OLD_CATEGORY}</strong>. Either the migration has already been run or there are no records to update.</p>
+      <button class="btn-secondary" style="width:100%;" onclick="closeModal()">Close</button>
+    `);
+    return;
+  }
+
+  // Build preview list (show up to 10)
+  const preview = affected.slice(0, 10).map(t =>
+    `<li style="padding:4px 0;font-size:13px;">${t.date} — ${t.category} — $${(t.amount || t.serviceAmount || 0).toLocaleString()}</li>`
+  ).join('');
+  const overflow = affected.length > 10 ? `<li style="font-size:13px;color:var(--text-muted);">…and ${affected.length - 10} more</li>` : '';
+
+  const confirmed = await new Promise(resolve => {
+    openModal(`
+      <h2 class="modal-title">Preview Migration</h2>
+      <p style="color:var(--text);line-height:1.6;margin-bottom:12px;">
+        Found <strong>${affected.length} transaction${affected.length !== 1 ? 's' : ''}</strong> with category <strong>${OLD_CATEGORY}</strong>.
+        These will be updated to <strong>category: "${NEW_CATEGORY}"</strong> + <strong>employee: "${EMPLOYEE_NAME}"</strong>.
+      </p>
+      <ul style="margin:0 0 16px 0;padding-left:18px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px 12px;">
+        ${preview}${overflow}
+      </ul>
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">A backup of these transactions will be downloaded before any changes are made.</p>
+      <div style="display:flex;gap:12px;">
+        <button class="btn-secondary" style="flex:1;" onclick="closeModal();window._confirmResolve(false)">Cancel</button>
+        <button class="btn-primary" style="flex:1;" onclick="closeModal();window._confirmResolve(true)">Download Backup &amp; Migrate</button>
+      </div>
+    `);
+    window._confirmResolve = resolve;
+  });
+
+  if (!confirmed) return;
+
+  // Download backup of affected transactions
+  try {
+    const backupData = {
+      exportDate: new Date().toISOString(),
+      description: 'Pre-migration backup — Vagaro Income employee field migration',
+      affectedCount: affected.length,
+      transactions: affected
+    };
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vagaro-migration-backup-${todayStr()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch(err) {
+    showToast('Error creating backup — migration aborted');
+    console.error(err);
+    return;
+  }
+
+  // Migrate in batches of 50
+  const BATCH_SIZE = 50;
+  let migrated = 0;
+  try {
+    for (let i = 0; i < affected.length; i += BATCH_SIZE) {
+      const batch = affected.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(t =>
+        db.transactions.update(t.id, { category: NEW_CATEGORY, employee: EMPLOYEE_NAME })
+      ));
+      migrated += batch.length;
+    }
+  } catch(err) {
+    showToast(`Error after ${migrated} updates — migration stopped. Restore from backup if needed.`);
+    console.error(err);
+    return;
+  }
+
+  // Success — offer to remove old category
+  const removeOld = await new Promise(resolve => {
+    openModal(`
+      <h2 class="modal-title">Migration Complete ✓</h2>
+      <p style="color:var(--text);line-height:1.6;margin-bottom:20px;">
+        Successfully migrated <strong>${migrated} transaction${migrated !== 1 ? 's' : ''}</strong>.<br><br>
+        Would you like to remove <strong>"${OLD_CATEGORY}"</strong> from your income categories? It is no longer needed.
+      </p>
+      <div style="display:flex;gap:12px;">
+        <button class="btn-secondary" style="flex:1;" onclick="closeModal();window._confirmResolve(false)">Keep It</button>
+        <button class="btn-primary" style="flex:1;" onclick="closeModal();window._confirmResolve(true)">Remove It</button>
+      </div>
+    `);
+    window._confirmResolve = resolve;
+  });
+
+  if (removeOld) {
+    await removeLegacyVagaroCategory(OLD_CATEGORY);
+  } else {
+    showToast('Migration complete ✓');
+  }
+}
+
+async function removeLegacyVagaroCategory(categoryName) {
+  const idx = state.categories.INCOME.indexOf(categoryName);
+  if (idx === -1) {
+    showToast('Category not found — may already be removed');
+    return;
+  }
+  state.categories.INCOME.splice(idx, 1);
+  await saveCategories();
+  showToast('Migration complete — old category removed ✓');
 }
 
 async function exportBackup() {
