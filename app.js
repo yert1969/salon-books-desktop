@@ -1310,12 +1310,21 @@ function renderTransactionItem(t) {
   const amount = isIncome ? (t.serviceAmount||0) + (t.tipAmount||0) : (t.amount||0);
   const tipText = isIncome && t.tipAmount > 0 ? ` (+${fmt(t.tipAmount)} tip)` : '';
   
+  // Build category display - show employee for Vagaro Income and Employee Pay
+  let categoryDisplay = escapeHTML(t.category);
+  if (t.category === 'Vagaro Income' && t.employee) {
+    categoryDisplay = `Vagaro Income (${escapeHTML(t.employee.split(' ')[0])})`;
+  } else if (t.category === 'Employee Pay' && t.employee) {
+    const typeLabel = t.payType === 'taxes' ? '📋' : '💰';
+    categoryDisplay = `Employee Pay — ${escapeHTML(t.employee.split(' ')[0])} ${typeLabel}`;
+  }
+  
   return `
     <div class="transaction-item" onclick="openEditTransactionModal('${t.id}')">
       <div class="transaction-icon ${isIncome ? 'income' : 'expense'}">${isIncome ? '💰' : '💸'}</div>
       <div class="transaction-details">
-        <div class="transaction-category">${t.category}</div>
-        <div class="transaction-meta">${t.clientName || ''}${t.clientName && t.notes ? ' · ' : ''}${t.notes || ''}</div>
+        <div class="transaction-category">${categoryDisplay}</div>
+        <div class="transaction-meta">${escapeHTML(t.clientName || '')}${t.clientName && t.notes ? ' · ' : ''}${escapeHTML(t.notes || '')}</div>
       </div>
       <div class="transaction-amount ${isIncome ? 'income' : 'expense'}">${isIncome ? '+' : '-'}${fmt(amount)}${tipText}</div>
       <div class="transaction-actions">
@@ -1635,9 +1644,19 @@ async function openEditTransactionModal(id) {
     </div>
     
     ${isIncome ? `
+      <!-- Vagaro Income Employee Field -->
+      <div class="form-group" id="edit-vagaro-employee-field" ${t.category === 'Vagaro Income' ? '' : 'style="display:none;"'}>
+        <label class="form-label">Employee</label>
+        <select class="form-select" id="edit-vagaro-employee">
+          ${(state.employees || ['Chasity McGill']).map(e => 
+            `<option value="${escapeHTML(e)}" ${e === (t.employee || 'Chasity McGill') ? 'selected' : ''}>${escapeHTML(e)}</option>`
+          ).join('')}
+        </select>
+      </div>
+      
       <div class="form-group">
         <label class="form-label">Client Name</label>
-        <input type="text" class="form-input" id="edit-client" value="${t.clientName || ''}">
+        <input type="text" class="form-input" id="edit-client" value="${escapeHTML(t.clientName || '')}">
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -1716,6 +1735,13 @@ async function updateTransaction(id, isIncome) {
     changes.tipAmount = parseFloat(document.getElementById('edit-tip').value) || 0;
     changes.amount = changes.serviceAmount;
     changes.clientName = document.getElementById('edit-client').value.trim() || null;
+    
+    // Add employee field for Vagaro Income
+    if (category === 'Vagaro Income') {
+      changes.employee = document.getElementById('edit-vagaro-employee')?.value || 'Chasity McGill';
+    } else {
+      changes.employee = null;
+    }
   } else {
     changes.amount = parseFloat(document.getElementById('edit-amount').value) || 0;
     
