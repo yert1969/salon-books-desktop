@@ -3728,6 +3728,7 @@ async function renderSettingsView() {
       <div class="settings-nav">
         <button class="settings-nav-item active" onclick="showSettingsSection('general')">General</button>
         <button class="settings-nav-item" onclick="showSettingsSection('categories')">Categories</button>
+        <button class="settings-nav-item" onclick="showSettingsSection('vagaro')">Vagaro Import</button>
         <button class="settings-nav-item" onclick="showSettingsSection('security')">Security</button>
         <button class="settings-nav-item" onclick="showSettingsSection('data')">Data & Backup</button>
         <button class="settings-nav-item" onclick="showSettingsSection('usage')">API Usage</button>
@@ -3773,6 +3774,8 @@ function showSettingsSection(section) {
     renderSettingsView();
   } else if (section === 'categories') {
     renderCategoriesSettings(container);
+  } else if (section === 'vagaro') {
+    renderVagaroImportSettings(container);
   } else if (section === 'security') {
     renderSecuritySettings(container);
   } else if (section === 'data') {
@@ -4086,6 +4089,462 @@ async function clearAllData() {
 async function saveSetting(key, value) {
   await db.settings.put({ key, value });
   showToast('Setting saved ✓');
+}
+
+// ----------------------------------------------------------------
+// VAGARO IMPORT
+// ----------------------------------------------------------------
+
+// State for tracking imported data before committing
+let vagaroImportState = {
+  payroll: null,
+  paymentDist: null,
+  deposits: null,
+  parsedData: null
+};
+
+async function renderVagaroImportSettings(container) {
+  const lastImport = (await db.settings.get('lastVagaroImport'))?.value;
+  
+  container.innerHTML = `
+    <div class="settings-section">
+      <div class="settings-section-title">Vagaro Employee Import</div>
+      <p style="color:var(--text-muted);margin-bottom:20px;line-height:1.5;">
+        Import Vagaro exports to record Chasity's income — both <strong>card payments</strong> (deposited to your bank) 
+        and <strong>cash collected</strong> (kept by Chasity but still salon revenue).
+      </p>
+      
+      ${lastImport ? `<div style="background:var(--success-bg);padding:10px 14px;border-radius:8px;margin-bottom:20px;font-size:13px;color:var(--success);">
+        ✓ Last import: ${escapeHTML(lastImport)}
+      </div>` : ''}
+      
+      <div style="display:grid;gap:16px;margin-bottom:24px;">
+        <div class="vagaro-upload-card" id="upload-payment">
+          <div class="vagaro-upload-icon">💳</div>
+          <div class="vagaro-upload-info">
+            <div class="vagaro-upload-title">Payment Distribution <span style="color:var(--danger);font-size:11px;">Required</span></div>
+            <div class="vagaro-upload-sub">Shows cash vs card breakdown — this is the key file</div>
+          </div>
+          <div class="vagaro-upload-status" id="payment-status">Not uploaded</div>
+          <input type="file" id="vagaro-payment" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('paymentDist', this.files[0])">
+          <button class="btn-secondary" onclick="document.getElementById('vagaro-payment').click()">Upload</button>
+        </div>
+        
+        <div class="vagaro-upload-card" id="upload-payroll">
+          <div class="vagaro-upload-icon">📋</div>
+          <div class="vagaro-upload-info">
+            <div class="vagaro-upload-title">Payroll Report <span style="color:var(--text-muted);font-size:11px;">Optional</span></div>
+            <div class="vagaro-upload-sub">Adds pay period dates and employee name</div>
+          </div>
+          <div class="vagaro-upload-status" id="payroll-status">Not uploaded</div>
+          <input type="file" id="vagaro-payroll" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('payroll', this.files[0])">
+          <button class="btn-secondary" onclick="document.getElementById('vagaro-payroll').click()">Upload</button>
+        </div>
+        
+        <div class="vagaro-upload-card" id="upload-deposits" style="opacity:0.7;">
+          <div class="vagaro-upload-icon">🏦</div>
+          <div class="vagaro-upload-info">
+            <div class="vagaro-upload-title">Deposits Report <span style="color:var(--text-muted);font-size:11px;">Optional</span></div>
+            <div class="vagaro-upload-sub">Shows processing fees (FYI only, not imported)</div>
+          </div>
+          <div class="vagaro-upload-status" id="deposits-status">Not uploaded</div>
+          <input type="file" id="vagaro-deposits" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('deposits', this.files[0])">
+          <button class="btn-secondary" onclick="document.getElementById('vagaro-deposits').click()">Upload</button>
+        </div>
+      </div>
+      
+      <div id="vagaro-preview" style="display:none;"></div>
+      
+      <div id="vagaro-actions" style="display:none;margin-top:20px;">
+        <button class="btn-primary" onclick="commitVagaroImport()" style="width:100%;">
+          Import as Income Transactions
+        </button>
+        <button class="btn-secondary" onclick="clearVagaroImport()" style="width:100%;margin-top:10px;">
+          Clear & Start Over
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function handleVagaroFile(type, file) {
+  if (!file) return;
+  
+  try {
+    const data = await file.arrayBuffer();
+    const workbook = XLSX.read(data, { type: 'array' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const json = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    
+    vagaroImportState[type] = { fileName: file.name, data: json, raw: sheet };
+    
+    // Update status
+    const statusEl = document.getElementById(type === 'payroll' ? 'payroll-status' : 
+                                             type === 'paymentDist' ? 'payment-status' : 'deposits-status');
+    if (statusEl) {
+      statusEl.textContent = '✓ Uploaded';
+      statusEl.style.color = 'var(--success)';
+    }
+    
+    // Try to parse and show preview
+    tryParseVagaroData();
+    
+  } catch(err) {
+    console.error('Error reading file:', err);
+    showToast('Error reading file: ' + err.message);
+  }
+}
+
+function tryParseVagaroData() {
+  const { payroll, paymentDist, deposits } = vagaroImportState;
+  
+  // Need at least Payment Distribution to proceed (it has cash vs card)
+  if (!paymentDist) return;
+  
+  try {
+    // Start with payment distribution (the key file)
+    const pmtData = parsePaymentDistribution(paymentDist.data);
+    
+    const parsed = {
+      employeeName: pmtData.employeeName || 'Chasity',
+      payPeriod: pmtData.dateRange || '',
+      cashCollected: pmtData.cash,
+      cardTotal: pmtData.card,
+      paymentDistTotal: pmtData.total,
+      serviceRevenue: pmtData.total // Total from payment dist is service revenue
+    };
+    
+    // Add payroll data if available (for better dates and employee info)
+    if (payroll) {
+      const payrollData = parseVagaroPayroll(payroll.data);
+      if (payrollData.payPeriod) parsed.payPeriod = payrollData.payPeriod;
+      if (payrollData.employeeName) parsed.employeeName = payrollData.employeeName;
+      if (payrollData.payPeriodStart) parsed.payPeriodStart = payrollData.payPeriodStart;
+      if (payrollData.payPeriodEnd) parsed.payPeriodEnd = payrollData.payPeriodEnd;
+    }
+    
+    // Add deposits data if available (just FYI for fees)
+    if (deposits) {
+      const depData = parseDeposits(deposits.data);
+      parsed.processingFees = depData.totalFees;
+      parsed.netDeposit = depData.netDeposit;
+    }
+    
+    vagaroImportState.parsedData = parsed;
+    showVagaroPreview(parsed);
+    
+  } catch(err) {
+    console.error('Parse error:', err);
+    showToast('Error parsing data: ' + err.message);
+  }
+}
+
+function parseVagaroPayroll(data) {
+  // Find the payroll period row
+  let payPeriod = '';
+  let employeeName = '';
+  let serviceRevenue = 0;
+  let grossPay = 0;
+  let hoursWorked = '';
+  let commissionTotal = 0;
+  let taxes = 0;
+  
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const firstCell = String(row[0] || '');
+    
+    // Find pay period
+    if (firstCell.includes('Payroll Period:')) {
+      const match = firstCell.match(/Payroll Period:\s*(.+)/);
+      if (match) payPeriod = match[1].trim();
+    }
+    
+    // Find employee data row (has name and numbers)
+    if (row[0] && !firstCell.includes('Employee') && !firstCell.includes('Total') && 
+        !firstCell.includes('Payroll') && !firstCell.includes('Note') && row.length > 10) {
+      // Check if this looks like a data row (has numeric values)
+      const hasNumbers = row.some(cell => typeof cell === 'number' && cell > 0);
+      if (hasNumbers) {
+        employeeName = String(row[0]).trim();
+        
+        // Parse the row - find Services column (typically column 5 after the main data)
+        // Structure: Employee, Pay Rate, OT, Paid Time Off, Services, Classes, Products, Commission fields...
+        for (let j = 1; j < row.length; j++) {
+          const val = row[j];
+          if (typeof val === 'number') {
+            // First significant number after name columns is usually Services
+            if (serviceRevenue === 0 && val > 100) {
+              serviceRevenue = val;
+            }
+          }
+        }
+        
+        // Find specific values by looking for patterns
+        // Services is usually around column 5-6, Commission Total around column 16
+        if (row[5] && typeof row[5] === 'number') serviceRevenue = row[5];
+        if (row[16] && typeof row[16] === 'number') commissionTotal = row[16];
+        if (row[23] && typeof row[23] === 'number') taxes = row[23];
+        
+        // Hours from column 1 (format: "$16.00 / 25h 0m")
+        const hoursMatch = String(row[1]).match(/(\d+)h\s*(\d+)m/);
+        if (hoursMatch) {
+          hoursWorked = `${hoursMatch[1]}h ${hoursMatch[2]}m`;
+        }
+        
+        // Gross pay from Commission Total or column 21
+        grossPay = commissionTotal || row[21] || 0;
+      }
+    }
+  }
+  
+  return {
+    payPeriod,
+    employeeName,
+    serviceRevenue,
+    grossPay,
+    hoursWorked,
+    commissionTotal,
+    taxes,
+    payPeriodStart: extractPayPeriodDates(payPeriod).start,
+    payPeriodEnd: extractPayPeriodDates(payPeriod).end
+  };
+}
+
+function parsePaymentDistribution(data) {
+  let cash = 0, card = 0, total = 0;
+  let employeeName = '';
+  let dateRange = '';
+  
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const firstCell = String(row[0] || '').trim();
+    
+    // Get date range and employee from first rows
+    if (i === 0 && row[1]) {
+      employeeName = String(row[1]).trim();
+    }
+    if (firstCell.includes(' to ')) {
+      dateRange = firstCell;
+    }
+    
+    // Parse payment types
+    if (firstCell === 'Cash') {
+      cash = parseCurrency(row[3] || row[1]);
+    } else if (firstCell === 'Visa' || firstCell === 'Master-Card' || 
+               firstCell === 'Discover' || firstCell === 'American Express') {
+      card += parseCurrency(row[3] || row[1]);
+    } else if (firstCell.includes('Total') && firstCell.includes('Excluding')) {
+      total = parseCurrency(row[3] || row[1]);
+    }
+  }
+  
+  return { cash, card, total, employeeName, dateRange };
+}
+
+function parseDeposits(data) {
+  let totalFees = 0;
+  let netDeposit = 0;
+  const dates = [];
+  
+  for (let i = 1; i < data.length; i++) { // Skip header row
+    const row = data[i];
+    if (!row[0]) continue;
+    
+    const date = row[0];
+    const fees = Math.abs(parseCurrency(row[15])); // Total Fee column
+    const net = parseCurrency(row[22]); // Net Deposit column
+    
+    if (date && (fees > 0 || net > 0)) {
+      dates.push(date);
+      totalFees += fees;
+      netDeposit += net;
+    }
+  }
+  
+  return { totalFees, netDeposit, dates };
+}
+
+function parseCurrency(val) {
+  if (typeof val === 'number') return val;
+  if (!val) return 0;
+  const str = String(val).replace(/[$,()]/g, '').trim();
+  const num = parseFloat(str);
+  return isNaN(num) ? 0 : (String(val).includes('(') ? -num : num);
+}
+
+function extractPayPeriodDates(periodStr) {
+  // Format: "Sun, Mar 08, 2026 - Sat, Mar 14, 2026"
+  const match = periodStr.match(/(\w+,\s*\w+\s+\d+,\s*\d+)\s*-\s*(\w+,\s*\w+\s+\d+,\s*\d+)/);
+  if (match) {
+    return {
+      start: new Date(match[1]).toISOString().split('T')[0],
+      end: new Date(match[2]).toISOString().split('T')[0]
+    };
+  }
+  return { start: null, end: null };
+}
+
+function showVagaroPreview(parsed) {
+  const previewEl = document.getElementById('vagaro-preview');
+  const actionsEl = document.getElementById('vagaro-actions');
+  
+  if (!previewEl) return;
+  
+  // Calculate card income (what hits Annette's bank) = total - cash
+  const cardIncome = (parsed.paymentDistTotal || parsed.serviceRevenue) - (parsed.cashCollected || 0);
+  const cashIncome = parsed.cashCollected || 0;
+  const totalIncome = cardIncome + cashIncome;
+  
+  // Store for commit
+  parsed.cardIncome = cardIncome;
+  parsed.cashIncome = cashIncome;
+  
+  previewEl.style.display = 'block';
+  previewEl.innerHTML = `
+    <div style="background:var(--bg-card);border-radius:12px;padding:20px;border:1px solid var(--border);">
+      <div style="font-weight:600;font-size:16px;margin-bottom:16px;color:var(--plum);">
+        📊 Import Preview
+      </div>
+      
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+        <div style="background:var(--cream);padding:12px;border-radius:8px;">
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Employee</div>
+          <div style="font-size:15px;font-weight:600;">${escapeHTML(parsed.employeeName) || 'Chasity'}</div>
+        </div>
+        <div style="background:var(--cream);padding:12px;border-radius:8px;">
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Pay Period</div>
+          <div style="font-size:13px;font-weight:500;">${escapeHTML(parsed.payPeriod) || 'Unknown'}</div>
+        </div>
+      </div>
+      
+      <div style="border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
+        <div style="font-weight:600;margin-bottom:12px;color:var(--success);">Income to Record</div>
+        
+        <div style="background:var(--success-bg);padding:14px;border-radius:8px;margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div>
+              <div style="font-weight:600;">💳 Card Payments</div>
+              <div style="font-size:12px;color:var(--text-muted);">Deposited to Annette's bank account</div>
+            </div>
+            <span style="font-size:18px;font-weight:700;color:var(--success);">${fmt(cardIncome)}</span>
+          </div>
+        </div>
+        
+        <div style="background:var(--gold-lighter);padding:14px;border-radius:8px;margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div>
+              <div style="font-weight:600;">💵 Cash Collected</div>
+              <div style="font-size:12px;color:var(--text-muted);">Kept by Chasity (still salon revenue)</div>
+            </div>
+            <span style="font-size:18px;font-weight:700;color:var(--gold-dark);">${fmt(cashIncome)}</span>
+          </div>
+        </div>
+        
+        <div style="display:flex;justify-content:space-between;font-weight:600;border-top:1px dashed var(--border);padding-top:12px;margin-top:12px;">
+          <span>Total Service Revenue</span>
+          <span style="font-size:18px;">${fmt(totalIncome)}</span>
+        </div>
+      </div>
+      
+      ${parsed.processingFees ? `
+      <div style="padding:10px 12px;background:var(--cream);border-radius:8px;font-size:13px;color:var(--text-muted);margin-bottom:16px;">
+        <strong>FYI:</strong> Processing fees of ${fmt(parsed.processingFees)} were deducted from card deposits.
+        <br><span style="font-size:12px;">(Not imported - you'll see this in your bank statement)</span>
+      </div>
+      ` : ''}
+      
+      <div style="padding:12px;background:var(--info-bg);border-radius:8px;font-size:13px;color:var(--text-muted);">
+        <strong>What will be created:</strong>
+        <ul style="margin:8px 0 0 16px;padding:0;">
+          <li>1 Income: "Chasity (Vagaro Income)" for ${fmt(cardIncome)} — Card payments</li>
+          <li>1 Income: "Chasity (Vagaro Income)" for ${fmt(cashIncome)} — Cash collected</li>
+        </ul>
+      </div>
+    </div>
+  `;
+  
+  if (actionsEl) {
+    actionsEl.style.display = 'block';
+  }
+}
+
+async function commitVagaroImport() {
+  const parsed = vagaroImportState.parsedData;
+  if (!parsed) {
+    showToast('No data to import');
+    return;
+  }
+  
+  const confirmed = await confirmDialog(
+    `This will create income transactions for the pay period ${parsed.payPeriod || '(unknown dates)'}. Continue?`,
+    'Confirm Import'
+  );
+  if (!confirmed) return;
+  
+  try {
+    // Determine the date to use (end of pay period, or today)
+    const txnDate = parsed.payPeriodEnd || todayStr();
+    const periodNote = parsed.payPeriod || 'Pay period';
+    
+    // Create income transaction for CARD payments (what hits Annette's bank)
+    if (parsed.cardIncome > 0) {
+      await db.transactions.add({
+        id: generateId(),
+        date: txnDate,
+        type: 'INCOME',
+        category: 'Chasity (Vagaro Income)',
+        serviceAmount: parsed.cardIncome,
+        tipAmount: 0,
+        paymentMethod: 'Card',
+        clientName: '',
+        notes: `[Vagaro Import] Card payments — ${periodNote}`,
+        createdAt: new Date().toISOString()
+      });
+    }
+    
+    // Create income transaction for CASH collected (Chasity kept this)
+    if (parsed.cashIncome > 0) {
+      await db.transactions.add({
+        id: generateId(),
+        date: txnDate,
+        type: 'INCOME',
+        category: 'Chasity (Vagaro Income)',
+        serviceAmount: parsed.cashIncome,
+        tipAmount: 0,
+        paymentMethod: 'Cash',
+        clientName: '',
+        notes: `[Vagaro Import] Cash collected by Chasity — ${periodNote}`,
+        createdAt: new Date().toISOString()
+      });
+    }
+    
+    // Ensure category exists
+    if (!state.categories.INCOME.includes('Chasity (Vagaro Income)')) {
+      state.categories.INCOME.push('Chasity (Vagaro Income)');
+      await saveCategories();
+    }
+    
+    // Save last import date
+    await db.settings.put({ key: 'lastVagaroImport', value: `${todayStr()} - ${parsed.payPeriod || 'Unknown period'}` });
+    
+    showToast('Import successful! ✓');
+    clearVagaroImport();
+    
+  } catch(err) {
+    console.error('Import error:', err);
+    showToast('Error importing: ' + err.message);
+  }
+}
+
+function clearVagaroImport() {
+  vagaroImportState = {
+    payroll: null,
+    paymentDist: null,
+    deposits: null,
+    parsedData: null
+  };
+  showSettingsSection('vagaro');
 }
 
 // ----------------------------------------------------------------
