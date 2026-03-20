@@ -4492,7 +4492,6 @@ async function commitVagaroImport() {
     // Create income transaction for CARD payments (what hits Annette's bank)
     if (parsed.cardIncome > 0) {
       await db.transactions.add({
-        id: generateId(),
         date: txnDate,
         type: 'INCOME',
         category: 'Chasity (Vagaro Income)',
@@ -4501,14 +4500,13 @@ async function commitVagaroImport() {
         paymentMethod: 'Card',
         clientName: '',
         notes: `[Vagaro Import] Card payments — ${periodNote}`,
-        createdAt: new Date().toISOString()
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
     
     // Create income transaction for CASH collected (Chasity kept this)
     if (parsed.cashIncome > 0) {
       await db.transactions.add({
-        id: generateId(),
         date: txnDate,
         type: 'INCOME',
         category: 'Chasity (Vagaro Income)',
@@ -4517,7 +4515,7 @@ async function commitVagaroImport() {
         paymentMethod: 'Cash',
         clientName: '',
         notes: `[Vagaro Import] Cash collected by Chasity — ${periodNote}`,
-        createdAt: new Date().toISOString()
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
     
