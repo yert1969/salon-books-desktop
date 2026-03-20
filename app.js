@@ -176,6 +176,8 @@ const state = {
   showRentersTab: false,
   categories: { INCOME: [], EXPENSE: [] },
   transactionsToShow: 30,
+  entriesTypeFilter: 'all',
+  entriesCategoryFilter: '',
   dashboardMonth: new Date().getMonth() + 1,
   dashboardYear: new Date().getFullYear(),
   clientSort: 'total',
@@ -1234,7 +1236,7 @@ async function renderMonthlyEntries(container) {
 async function renderAllEntries(container) {
   let allTransactions = await db.transactions.toArray();
   const allMonthly = await db.monthlyExpenses.toArray();
-  
+
   // Normalize monthly expenses
   allMonthly.forEach(e => {
     allTransactions.push({
@@ -1245,17 +1247,44 @@ async function renderAllEntries(container) {
       amount: e.amount || 0,
     });
   });
-  
+
   // Sort by date descending
   allTransactions.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  
+
+  // Build category options from all transactions (deduplicated)
+  const allCategories = [...new Set(allTransactions.map(t => t.category).filter(Boolean))].sort();
+  const typeF = state.entriesTypeFilter;
+  const catF = state.entriesCategoryFilter;
+
+  // Apply filters
+  let filtered = allTransactions;
+  if (typeF === 'income') filtered = filtered.filter(t => t.type === 'INCOME');
+  else if (typeF === 'expense') filtered = filtered.filter(t => t.type === 'EXPENSE');
+  if (catF) filtered = filtered.filter(t => t.category === catF);
+
   const toShow = state.transactionsToShow;
-  const display = allTransactions.slice(0, toShow);
-  const hasMore = allTransactions.length > toShow;
-  
+  const display = filtered.slice(0, toShow);
+  const hasMore = filtered.length > toShow;
+
+  const catOptions = allCategories.map(c =>
+    `<option value="${escapeHTML(c)}" ${catF === c ? 'selected' : ''}>${escapeHTML(c)}</option>`
+  ).join('');
+
   let html = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;">
+      <div style="display:flex;gap:4px;">
+        <button class="view-tab ${typeF === 'all' ? 'active' : ''}" onclick="setEntriesFilter('all','')">All</button>
+        <button class="view-tab ${typeF === 'income' ? 'active' : ''}" onclick="setEntriesFilter('income','')">Income</button>
+        <button class="view-tab ${typeF === 'expense' ? 'active' : ''}" onclick="setEntriesFilter('expense','')">Expenses</button>
+      </div>
+      <select onchange="setEntriesFilter('${typeF}', this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px;cursor:pointer;">
+        <option value="">All Categories</option>
+        ${catOptions}
+      </select>
+      ${(typeF !== 'all' || catF) ? `<button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="setEntriesFilter('all','')">Clear</button>` : ''}
+    </div>
     <div style="margin-bottom:16px;font-size:14px;color:var(--text-muted);">
-      Showing ${display.length} of ${allTransactions.length} entries
+      Showing ${display.length} of ${filtered.length} entries${filtered.length !== allTransactions.length ? ` (filtered from ${allTransactions.length})` : ''}
     </div>
     <div class="transaction-list">
   `;
@@ -1346,6 +1375,13 @@ function switchEntriesView(mode) {
   document.querySelector(`.view-tab:nth-child(${mode === 'daily' ? 1 : mode === 'monthly' ? 2 : 3})`).classList.add('active');
   renderEntriesContent();
   renderEntryForm();
+}
+
+function setEntriesFilter(type, category) {
+  state.entriesTypeFilter = type;
+  state.entriesCategoryFilter = category;
+  state.transactionsToShow = 30;
+  renderEntriesContent();
 }
 
 function changeEntriesDate(days) {
