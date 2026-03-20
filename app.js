@@ -225,6 +225,17 @@ function fmt(amount) {
   return '$' + parseFloat(amount).toFixed(2);
 }
 
+// Security: Escape HTML to prevent XSS attacks from user-generated content
+function escapeHTML(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function monthName(num) {
   return new Date(2000, num - 1, 1).toLocaleString('en-US', { month: 'long' });
 }
@@ -4110,7 +4121,7 @@ async function renderVagaroImportSettings(container) {
     <div class="settings-section">
       <div class="settings-section-title">Vagaro Employee Import</div>
       <p style="color:var(--text-muted);margin-bottom:20px;line-height:1.5;">
-        Import Vagaro exports to record Chasity's income — both <strong>card payments</strong> (deposited to your bank) 
+        Import Chasity's weekly income from Vagaro. This captures both <strong>card payments</strong> (deposited to your bank) 
         and <strong>cash collected</strong> (kept by Chasity but still salon revenue).
       </p>
       
@@ -4118,39 +4129,15 @@ async function renderVagaroImportSettings(container) {
         ✓ Last import: ${escapeHTML(lastImport)}
       </div>` : ''}
       
-      <div style="display:grid;gap:16px;margin-bottom:24px;">
-        <div class="vagaro-upload-card" id="upload-payment">
-          <div class="vagaro-upload-icon">💳</div>
-          <div class="vagaro-upload-info">
-            <div class="vagaro-upload-title">Payment Distribution <span style="color:var(--danger);font-size:11px;">Required</span></div>
-            <div class="vagaro-upload-sub">Shows cash vs card breakdown — this is the key file</div>
-          </div>
-          <div class="vagaro-upload-status" id="payment-status">Not uploaded</div>
-          <input type="file" id="vagaro-payment" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('paymentDist', this.files[0])">
-          <button class="btn-secondary" onclick="document.getElementById('vagaro-payment').click()">Upload</button>
+      <div class="vagaro-upload-card" id="upload-payment" style="margin-bottom:24px;">
+        <div class="vagaro-upload-icon">💳</div>
+        <div class="vagaro-upload-info">
+          <div class="vagaro-upload-title">Payment Distribution</div>
+          <div class="vagaro-upload-sub">Export from Vagaro → Reports → Payment Distribution</div>
         </div>
-        
-        <div class="vagaro-upload-card" id="upload-payroll">
-          <div class="vagaro-upload-icon">📋</div>
-          <div class="vagaro-upload-info">
-            <div class="vagaro-upload-title">Payroll Report <span style="color:var(--text-muted);font-size:11px;">Optional</span></div>
-            <div class="vagaro-upload-sub">Adds pay period dates and employee name</div>
-          </div>
-          <div class="vagaro-upload-status" id="payroll-status">Not uploaded</div>
-          <input type="file" id="vagaro-payroll" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('payroll', this.files[0])">
-          <button class="btn-secondary" onclick="document.getElementById('vagaro-payroll').click()">Upload</button>
-        </div>
-        
-        <div class="vagaro-upload-card" id="upload-deposits" style="opacity:0.7;">
-          <div class="vagaro-upload-icon">🏦</div>
-          <div class="vagaro-upload-info">
-            <div class="vagaro-upload-title">Deposits Report <span style="color:var(--text-muted);font-size:11px;">Optional</span></div>
-            <div class="vagaro-upload-sub">Shows processing fees (FYI only, not imported)</div>
-          </div>
-          <div class="vagaro-upload-status" id="deposits-status">Not uploaded</div>
-          <input type="file" id="vagaro-deposits" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('deposits', this.files[0])">
-          <button class="btn-secondary" onclick="document.getElementById('vagaro-deposits').click()">Upload</button>
-        </div>
+        <div class="vagaro-upload-status" id="payment-status">Not uploaded</div>
+        <input type="file" id="vagaro-payment" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('paymentDist', this.files[0])">
+        <button class="btn-secondary" onclick="document.getElementById('vagaro-payment').click()">Upload</button>
       </div>
       
       <div id="vagaro-preview" style="display:none;"></div>
