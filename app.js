@@ -3782,6 +3782,11 @@ function showSettingsSection(section) {
   }
   
   const container = document.getElementById('settings-section');
+  if (!container) {
+    // Settings view not rendered, navigate to it first
+    navigate('settings');
+    return;
+  }
   
   if (section === 'general') {
     renderSettingsView();
@@ -4448,7 +4453,11 @@ function clearVagaroImport() {
   vagaroImportState = {
     parsedData: null
   };
-  showSettingsSection('vagaro');
+  // Re-render the vagaro settings section if container exists
+  const container = document.getElementById('settings-section');
+  if (container) {
+    renderVagaroImportSettings(container);
+  }
 }
 
 // ----------------------------------------------------------------
