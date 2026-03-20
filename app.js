@@ -4209,6 +4209,8 @@ function tryParseVagaroData() {
     const parsed = {
       employeeName: pmtData.employeeName || 'Chasity',
       payPeriod: pmtData.dateRange || '',
+      payPeriodStart: pmtData.payPeriodStart,
+      payPeriodEnd: pmtData.payPeriodEnd,
       cashCollected: pmtData.cash,
       cardTotal: pmtData.card,
       paymentDistTotal: pmtData.total,
@@ -4220,6 +4222,7 @@ function tryParseVagaroData() {
       const payrollData = parseVagaroPayroll(payroll.data);
       if (payrollData.payPeriod) parsed.payPeriod = payrollData.payPeriod;
       if (payrollData.employeeName) parsed.employeeName = payrollData.employeeName;
+      // Payroll has more precise dates, so prefer those if available
       if (payrollData.payPeriodStart) parsed.payPeriodStart = payrollData.payPeriodStart;
       if (payrollData.payPeriodEnd) parsed.payPeriodEnd = payrollData.payPeriodEnd;
     }
@@ -4315,6 +4318,8 @@ function parsePaymentDistribution(data) {
   let cash = 0, card = 0, total = 0;
   let employeeName = '';
   let dateRange = '';
+  let payPeriodStart = null;
+  let payPeriodEnd = null;
   
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
@@ -4326,6 +4331,16 @@ function parsePaymentDistribution(data) {
     }
     if (firstCell.includes(' to ')) {
       dateRange = firstCell;
+      // Extract start and end dates: "Mar 8, 2026 to Mar 14, 2026"
+      const match = firstCell.match(/(\w+\s+\d+,\s*\d+)\s+to\s+(\w+\s+\d+,\s*\d+)/);
+      if (match) {
+        try {
+          const startDate = new Date(match[1]);
+          const endDate = new Date(match[2]);
+          if (!isNaN(startDate)) payPeriodStart = startDate.toISOString().split('T')[0];
+          if (!isNaN(endDate)) payPeriodEnd = endDate.toISOString().split('T')[0];
+        } catch(e) { /* ignore parse errors */ }
+      }
     }
     
     // Parse payment types
@@ -4339,7 +4354,7 @@ function parsePaymentDistribution(data) {
     }
   }
   
-  return { cash, card, total, employeeName, dateRange };
+  return { cash, card, total, employeeName, dateRange, payPeriodStart, payPeriodEnd };
 }
 
 function parseDeposits(data) {
