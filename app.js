@@ -4121,30 +4121,30 @@ async function renderVagaroImportSettings(container) {
     <div class="settings-section">
       <div class="settings-section-title">Vagaro Employee Import</div>
       <p style="color:var(--text-muted);margin-bottom:20px;line-height:1.5;">
-        Import Chasity's weekly income from Vagaro. This captures both <strong>card payments</strong> (deposited to your bank) 
-        and <strong>cash collected</strong> (kept by Chasity but still salon revenue).
+        Import Chasity's weekly <strong>service revenue</strong> from Vagaro. 
+        Tips are tracked separately (Chasity keeps 100%).
       </p>
       
       ${lastImport ? `<div style="background:var(--success-bg);padding:10px 14px;border-radius:8px;margin-bottom:20px;font-size:13px;color:var(--success);">
         ✓ Last import: ${escapeHTML(lastImport)}
       </div>` : ''}
       
-      <div class="vagaro-upload-card" id="upload-payment" style="margin-bottom:24px;">
-        <div class="vagaro-upload-icon">💳</div>
+      <div class="vagaro-upload-card" id="upload-txn" style="margin-bottom:24px;">
+        <div class="vagaro-upload-icon">📋</div>
         <div class="vagaro-upload-info">
-          <div class="vagaro-upload-title">Payment Distribution</div>
-          <div class="vagaro-upload-sub">Export from Vagaro → Reports → Payment Distribution</div>
+          <div class="vagaro-upload-title">Transaction List</div>
+          <div class="vagaro-upload-sub">Vagaro → Reports → Sales → Transaction List</div>
         </div>
-        <div class="vagaro-upload-status" id="payment-status">Not uploaded</div>
-        <input type="file" id="vagaro-payment" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroFile('paymentDist', this.files[0])">
-        <button class="btn-secondary" onclick="document.getElementById('vagaro-payment').click()">Upload</button>
+        <div class="vagaro-upload-status" id="txn-status">Not uploaded</div>
+        <input type="file" id="vagaro-txn" accept=".xlsx,.xls" style="display:none;" onchange="handleVagaroTransactionList(this.files[0])">
+        <button class="btn-secondary" onclick="document.getElementById('vagaro-txn').click()">Upload</button>
       </div>
       
       <div id="vagaro-preview" style="display:none;"></div>
       
       <div id="vagaro-actions" style="display:none;margin-top:20px;">
         <button class="btn-primary" onclick="commitVagaroImport()" style="width:100%;">
-          Import as Income Transactions
+          Import Service Revenue
         </button>
         <button class="btn-secondary" onclick="clearVagaroImport()" style="width:100%;margin-top:10px;">
           Clear & Start Over
@@ -4154,7 +4154,7 @@ async function renderVagaroImportSettings(container) {
   `;
 }
 
-async function handleVagaroFile(type, file) {
+async function handleVagaroTransactionList(file) {
   if (!file) return;
   
   try {
@@ -4164,18 +4164,17 @@ async function handleVagaroFile(type, file) {
     const sheet = workbook.Sheets[sheetName];
     const json = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
     
-    vagaroImportState[type] = { fileName: file.name, data: json, raw: sheet };
-    
     // Update status
-    const statusEl = document.getElementById(type === 'payroll' ? 'payroll-status' : 
-                                             type === 'paymentDist' ? 'payment-status' : 'deposits-status');
+    const statusEl = document.getElementById('txn-status');
     if (statusEl) {
       statusEl.textContent = '✓ Uploaded';
       statusEl.style.color = 'var(--success)';
     }
     
-    // Try to parse and show preview
-    tryParseVagaroData();
+    // Parse the transaction list
+    const parsed = parseTransactionList(json);
+    vagaroImportState.parsedData = parsed;
+    showVagaroPreview(parsed);
     
   } catch(err) {
     console.error('Error reading file:', err);
@@ -4183,142 +4182,49 @@ async function handleVagaroFile(type, file) {
   }
 }
 
-function tryParseVagaroData() {
-  const { payroll, paymentDist, deposits } = vagaroImportState;
-  
-  // Need at least Payment Distribution to proceed (it has cash vs card)
-  if (!paymentDist) return;
-  
-  try {
-    // Start with payment distribution (the key file)
-    const pmtData = parsePaymentDistribution(paymentDist.data);
-    
-    const parsed = {
-      employeeName: pmtData.employeeName || 'Chasity',
-      payPeriod: pmtData.dateRange || '',
-      payPeriodStart: pmtData.payPeriodStart,
-      payPeriodEnd: pmtData.payPeriodEnd,
-      cashCollected: pmtData.cash,
-      cardTotal: pmtData.card,
-      paymentDistTotal: pmtData.total,
-      serviceRevenue: pmtData.total // Total from payment dist is service revenue
-    };
-    
-    // Add payroll data if available (for better dates and employee info)
-    if (payroll) {
-      const payrollData = parseVagaroPayroll(payroll.data);
-      if (payrollData.payPeriod) parsed.payPeriod = payrollData.payPeriod;
-      if (payrollData.employeeName) parsed.employeeName = payrollData.employeeName;
-      // Payroll has more precise dates, so prefer those if available
-      if (payrollData.payPeriodStart) parsed.payPeriodStart = payrollData.payPeriodStart;
-      if (payrollData.payPeriodEnd) parsed.payPeriodEnd = payrollData.payPeriodEnd;
-    }
-    
-    // Add deposits data if available (just FYI for fees)
-    if (deposits) {
-      const depData = parseDeposits(deposits.data);
-      parsed.processingFees = depData.totalFees;
-      parsed.netDeposit = depData.netDeposit;
-    }
-    
-    vagaroImportState.parsedData = parsed;
-    showVagaroPreview(parsed);
-    
-  } catch(err) {
-    console.error('Parse error:', err);
-    showToast('Error parsing data: ' + err.message);
-  }
-}
-
-function parseVagaroPayroll(data) {
-  // Find the payroll period row
-  let payPeriod = '';
-  let employeeName = '';
-  let serviceRevenue = 0;
-  let grossPay = 0;
-  let hoursWorked = '';
-  let commissionTotal = 0;
-  let taxes = 0;
+function parseTransactionList(data) {
+  // Find header row (contains 'Checkout Date', 'Price', 'Tip', etc.)
+  let headerRowIndex = -1;
+  let headers = [];
   
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
-    const firstCell = String(row[0] || '');
-    
-    // Find pay period
-    if (firstCell.includes('Payroll Period:')) {
-      const match = firstCell.match(/Payroll Period:\s*(.+)/);
-      if (match) payPeriod = match[1].trim();
-    }
-    
-    // Find employee data row (has name and numbers)
-    if (row[0] && !firstCell.includes('Employee') && !firstCell.includes('Total') && 
-        !firstCell.includes('Payroll') && !firstCell.includes('Note') && row.length > 10) {
-      // Check if this looks like a data row (has numeric values)
-      const hasNumbers = row.some(cell => typeof cell === 'number' && cell > 0);
-      if (hasNumbers) {
-        employeeName = String(row[0]).trim();
-        
-        // Parse the row - find Services column (typically column 5 after the main data)
-        // Structure: Employee, Pay Rate, OT, Paid Time Off, Services, Classes, Products, Commission fields...
-        for (let j = 1; j < row.length; j++) {
-          const val = row[j];
-          if (typeof val === 'number') {
-            // First significant number after name columns is usually Services
-            if (serviceRevenue === 0 && val > 100) {
-              serviceRevenue = val;
-            }
-          }
-        }
-        
-        // Find specific values by looking for patterns
-        // Services is usually around column 5-6, Commission Total around column 16
-        if (row[5] && typeof row[5] === 'number') serviceRevenue = row[5];
-        if (row[16] && typeof row[16] === 'number') commissionTotal = row[16];
-        if (row[23] && typeof row[23] === 'number') taxes = row[23];
-        
-        // Hours from column 1 (format: "$16.00 / 25h 0m")
-        const hoursMatch = String(row[1]).match(/(\d+)h\s*(\d+)m/);
-        if (hoursMatch) {
-          hoursWorked = `${hoursMatch[1]}h ${hoursMatch[2]}m`;
-        }
-        
-        // Gross pay from Commission Total or column 21
-        grossPay = commissionTotal || row[21] || 0;
-      }
+    if (row.includes('Checkout Date') && row.includes('Price') && row.includes('Tip')) {
+      headerRowIndex = i;
+      headers = row;
+      break;
     }
   }
   
-  return {
-    payPeriod,
-    employeeName,
-    serviceRevenue,
-    grossPay,
-    hoursWorked,
-    commissionTotal,
-    taxes,
-    payPeriodStart: extractPayPeriodDates(payPeriod).start,
-    payPeriodEnd: extractPayPeriodDates(payPeriod).end
+  if (headerRowIndex === -1) {
+    throw new Error('Could not find transaction header row');
+  }
+  
+  // Get column indices
+  const colIndex = {
+    checkoutDate: headers.indexOf('Checkout Date'),
+    customer: headers.indexOf('Customer'),
+    price: headers.indexOf('Price'),
+    tip: headers.indexOf('Tip'),
+    cash: headers.indexOf('Cash'),
+    cc: headers.indexOf('CC'),
+    check: headers.indexOf('Check')
   };
-}
-
-function parsePaymentDistribution(data) {
-  let cash = 0, card = 0, total = 0;
-  let employeeName = '';
+  
+  // Extract date range and employee from top of file
   let dateRange = '';
+  let employeeName = 'Chasity';
   let payPeriodStart = null;
   let payPeriodEnd = null;
   
-  for (let i = 0; i < data.length; i++) {
+  for (let i = 0; i < Math.min(5, data.length); i++) {
     const row = data[i];
-    const firstCell = String(row[0] || '').trim();
+    const firstCell = String(row[0] || '');
+    const secondCell = String(row[1] || '');
     
-    // Get date range and employee from first rows
-    if (i === 0 && row[1]) {
-      employeeName = String(row[1]).trim();
-    }
     if (firstCell.includes(' to ')) {
       dateRange = firstCell;
-      // Extract start and end dates: "Mar 8, 2026 to Mar 14, 2026"
+      // Parse dates: "Mar 8, 2026 to Mar 14, 2026"
       const match = firstCell.match(/(\w+\s+\d+,\s*\d+)\s+to\s+(\w+\s+\d+,\s*\d+)/);
       if (match) {
         try {
@@ -4326,65 +4232,56 @@ function parsePaymentDistribution(data) {
           const endDate = new Date(match[2]);
           if (!isNaN(startDate)) payPeriodStart = startDate.toISOString().split('T')[0];
           if (!isNaN(endDate)) payPeriodEnd = endDate.toISOString().split('T')[0];
-        } catch(e) { /* ignore parse errors */ }
+        } catch(e) { /* ignore */ }
       }
     }
-    
-    // Parse payment types
-    if (firstCell === 'Cash') {
-      cash = parseCurrency(row[3] || row[1]);
-    } else if (firstCell === 'Visa' || firstCell === 'Master-Card' || 
-               firstCell === 'Discover' || firstCell === 'American Express') {
-      card += parseCurrency(row[3] || row[1]);
-    } else if (firstCell.includes('Total') && firstCell.includes('Excluding')) {
-      total = parseCurrency(row[3] || row[1]);
+    if (secondCell && !secondCell.includes('Service Providers')) {
+      employeeName = secondCell;
     }
   }
   
-  return { cash, card, total, employeeName, dateRange, payPeriodStart, payPeriodEnd };
-}
-
-function parseDeposits(data) {
-  let totalFees = 0;
-  let netDeposit = 0;
-  const dates = [];
+  // Sum up transactions
+  let cardServices = 0, cashServices = 0;
+  let cardTips = 0, cashTips = 0;
+  let transactionCount = 0;
   
-  for (let i = 1; i < data.length; i++) { // Skip header row
+  for (let i = headerRowIndex + 1; i < data.length; i++) {
     const row = data[i];
-    if (!row[0]) continue;
+    if (!row[colIndex.checkoutDate]) continue;
     
-    const date = row[0];
-    const fees = Math.abs(parseCurrency(row[15])); // Total Fee column
-    const net = parseCurrency(row[22]); // Net Deposit column
+    const price = parseFloat(row[colIndex.price]) || 0;
+    const tip = parseFloat(row[colIndex.tip]) || 0;
+    const cash = parseFloat(row[colIndex.cash]) || 0;
+    const cc = parseFloat(row[colIndex.cc]) || 0;
+    const check = parseFloat(row[colIndex.check]) || 0;
     
-    if (date && (fees > 0 || net > 0)) {
-      dates.push(date);
-      totalFees += fees;
-      netDeposit += net;
+    if (price === 0 && tip === 0) continue;
+    
+    transactionCount++;
+    
+    // Determine payment method
+    if (cash > 0 || check > 0) {
+      cashServices += price;
+      cashTips += tip;
+    } else if (cc > 0) {
+      cardServices += price;
+      cardTips += tip;
     }
   }
   
-  return { totalFees, netDeposit, dates };
-}
-
-function parseCurrency(val) {
-  if (typeof val === 'number') return val;
-  if (!val) return 0;
-  const str = String(val).replace(/[$,()]/g, '').trim();
-  const num = parseFloat(str);
-  return isNaN(num) ? 0 : (String(val).includes('(') ? -num : num);
-}
-
-function extractPayPeriodDates(periodStr) {
-  // Format: "Sun, Mar 08, 2026 - Sat, Mar 14, 2026"
-  const match = periodStr.match(/(\w+,\s*\w+\s+\d+,\s*\d+)\s*-\s*(\w+,\s*\w+\s+\d+,\s*\d+)/);
-  if (match) {
-    return {
-      start: new Date(match[1]).toISOString().split('T')[0],
-      end: new Date(match[2]).toISOString().split('T')[0]
-    };
-  }
-  return { start: null, end: null };
+  return {
+    employeeName,
+    payPeriod: dateRange,
+    payPeriodStart,
+    payPeriodEnd,
+    cardServices,
+    cashServices,
+    cardTips,
+    cashTips,
+    totalServices: cardServices + cashServices,
+    totalTips: cardTips + cashTips,
+    transactionCount
+  };
 }
 
 function showVagaroPreview(parsed) {
@@ -4393,14 +4290,8 @@ function showVagaroPreview(parsed) {
   
   if (!previewEl) return;
   
-  // Calculate card income (what hits Annette's bank) = total - cash
-  const cardIncome = (parsed.paymentDistTotal || parsed.serviceRevenue) - (parsed.cashCollected || 0);
-  const cashIncome = parsed.cashCollected || 0;
-  const totalIncome = cardIncome + cashIncome;
-  
-  // Store for commit
-  parsed.cardIncome = cardIncome;
-  parsed.cashIncome = cashIncome;
+  const totalServices = parsed.totalServices || 0;
+  const totalTips = parsed.totalTips || 0;
   
   previewEl.style.display = 'block';
   previewEl.innerHTML = `
@@ -4412,56 +4303,68 @@ function showVagaroPreview(parsed) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
         <div style="background:var(--cream);padding:12px;border-radius:8px;">
           <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Employee</div>
-          <div style="font-size:15px;font-weight:600;">${escapeHTML(parsed.employeeName) || 'Chasity'}</div>
+          <div style="font-size:15px;font-weight:600;">${escapeHTML(parsed.employeeName)}</div>
         </div>
         <div style="background:var(--cream);padding:12px;border-radius:8px;">
           <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Pay Period</div>
-          <div style="font-size:13px;font-weight:500;">${escapeHTML(parsed.payPeriod) || 'Unknown'}</div>
+          <div style="font-size:13px;font-weight:500;">${escapeHTML(parsed.payPeriod)}</div>
         </div>
       </div>
       
-      <div style="border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
-        <div style="font-weight:600;margin-bottom:12px;color:var(--success);">Income to Record</div>
+      <div style="background:var(--success-bg);padding:16px;border-radius:10px;margin-bottom:12px;">
+        <div style="font-weight:600;margin-bottom:12px;color:var(--success);">💰 Service Revenue (Salon Income)</div>
         
-        <div style="background:var(--success-bg);padding:14px;border-radius:8px;margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div>
-              <div style="font-weight:600;">💳 Card Payments</div>
-              <div style="font-size:12px;color:var(--text-muted);">Deposited to Annette's bank account</div>
-            </div>
-            <span style="font-size:18px;font-weight:700;color:var(--success);">${fmt(cardIncome)}</span>
-          </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+          <span>💳 Card services</span>
+          <span style="font-weight:600;">${fmt(parsed.cardServices)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:13px;color:var(--text-muted);">
+          <span style="padding-left:20px;">↳ Deposited to your bank</span>
         </div>
         
-        <div style="background:var(--gold-lighter);padding:14px;border-radius:8px;margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div>
-              <div style="font-weight:600;">💵 Cash Collected</div>
-              <div style="font-size:12px;color:var(--text-muted);">Kept by Chasity (still salon revenue)</div>
-            </div>
-            <span style="font-size:18px;font-weight:700;color:var(--gold-dark);">${fmt(cashIncome)}</span>
-          </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+          <span>💵 Cash services</span>
+          <span style="font-weight:600;">${fmt(parsed.cashServices)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:13px;color:var(--text-muted);">
+          <span style="padding-left:20px;">↳ Collected by Chasity (still salon revenue)</span>
         </div>
         
-        <div style="display:flex;justify-content:space-between;font-weight:600;border-top:1px dashed var(--border);padding-top:12px;margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px dashed var(--border);padding-top:10px;margin-top:10px;font-size:17px;">
           <span>Total Service Revenue</span>
-          <span style="font-size:18px;">${fmt(totalIncome)}</span>
+          <span style="color:var(--success);">${fmt(totalServices)}</span>
         </div>
       </div>
       
-      ${parsed.processingFees ? `
-      <div style="padding:10px 12px;background:var(--cream);border-radius:8px;font-size:13px;color:var(--text-muted);margin-bottom:16px;">
-        <strong>FYI:</strong> Processing fees of ${fmt(parsed.processingFees)} were deducted from card deposits.
-        <br><span style="font-size:12px;">(Not imported - you'll see this in your bank statement)</span>
+      <div style="background:var(--cream);padding:16px;border-radius:10px;margin-bottom:16px;">
+        <div style="font-weight:600;margin-bottom:12px;color:var(--text-muted);">💝 Tips (Chasity keeps 100%)</div>
+        
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:14px;">
+          <span>Card tips</span>
+          <span>${fmt(parsed.cardTips)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:14px;">
+          <span>Cash tips</span>
+          <span>${fmt(parsed.cashTips)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-weight:600;border-top:1px dashed var(--border);padding-top:8px;margin-top:8px;">
+          <span>Total Tips</span>
+          <span>${fmt(totalTips)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;font-style:italic;">
+          Not recorded as salon income — tracked for reference only
+        </div>
       </div>
-      ` : ''}
       
       <div style="padding:12px;background:var(--info-bg);border-radius:8px;font-size:13px;color:var(--text-muted);">
         <strong>What will be created:</strong>
         <ul style="margin:8px 0 0 16px;padding:0;">
-          <li>1 Income: "Chasity (Vagaro Income)" for ${fmt(cardIncome)} — Card payments</li>
-          <li>1 Income: "Chasity (Vagaro Income)" for ${fmt(cashIncome)} — Cash collected</li>
+          <li>1 Income: "Chasity (Vagaro Income)" — ${fmt(parsed.cardServices)} Card</li>
+          <li>1 Income: "Chasity (Vagaro Income)" — ${fmt(parsed.cashServices)} Cash</li>
         </ul>
+        <div style="margin-top:8px;font-size:12px;">
+          ${parsed.transactionCount} transactions from ${escapeHTML(parsed.payPeriod)}
+        </div>
       </div>
     </div>
   `;
@@ -4479,42 +4382,41 @@ async function commitVagaroImport() {
   }
   
   const confirmed = await confirmDialog(
-    `This will create income transactions for the pay period ${parsed.payPeriod || '(unknown dates)'}. Continue?`,
+    `Import service revenue for ${parsed.payPeriod || 'this pay period'}?\\n\\nCard: ${fmt(parsed.cardServices)}\\nCash: ${fmt(parsed.cashServices)}\\nTotal: ${fmt(parsed.totalServices)}`,
     'Confirm Import'
   );
   if (!confirmed) return;
   
   try {
-    // Determine the date to use (end of pay period, or today)
     const txnDate = parsed.payPeriodEnd || todayStr();
     const periodNote = parsed.payPeriod || 'Pay period';
     
-    // Create income transaction for CARD payments (what hits Annette's bank)
-    if (parsed.cardIncome > 0) {
+    // Create income transaction for CARD services
+    if (parsed.cardServices > 0) {
       await db.transactions.add({
         date: txnDate,
         type: 'INCOME',
         category: 'Chasity (Vagaro Income)',
-        serviceAmount: parsed.cardIncome,
+        serviceAmount: parsed.cardServices,
         tipAmount: 0,
         paymentMethod: 'Card',
         clientName: '',
-        notes: `[Vagaro Import] Card payments — ${periodNote}`,
+        notes: `[Vagaro Import] Card services — ${periodNote} (Tips: ${fmt(parsed.cardTips)} kept by Chasity)`,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
     
-    // Create income transaction for CASH collected (Chasity kept this)
-    if (parsed.cashIncome > 0) {
+    // Create income transaction for CASH services
+    if (parsed.cashServices > 0) {
       await db.transactions.add({
         date: txnDate,
         type: 'INCOME',
         category: 'Chasity (Vagaro Income)',
-        serviceAmount: parsed.cashIncome,
+        serviceAmount: parsed.cashServices,
         tipAmount: 0,
         paymentMethod: 'Cash',
         clientName: '',
-        notes: `[Vagaro Import] Cash collected by Chasity — ${periodNote}`,
+        notes: `[Vagaro Import] Cash services — ${periodNote} (Tips: ${fmt(parsed.cashTips)} kept by Chasity)`,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
@@ -4525,8 +4427,11 @@ async function commitVagaroImport() {
       await saveCategories();
     }
     
-    // Save last import date
-    await db.settings.put({ key: 'lastVagaroImport', value: `${todayStr()} - ${parsed.payPeriod || 'Unknown period'}` });
+    // Save last import info
+    await db.settings.put({ 
+      key: 'lastVagaroImport', 
+      value: `${todayStr()} — ${periodNote} (Services: ${fmt(parsed.totalServices)}, Tips: ${fmt(parsed.totalTips)})`
+    });
     
     showToast('Import successful! ✓');
     clearVagaroImport();
@@ -4539,9 +4444,6 @@ async function commitVagaroImport() {
 
 function clearVagaroImport() {
   vagaroImportState = {
-    payroll: null,
-    paymentDist: null,
-    deposits: null,
     parsedData: null
   };
   showSettingsSection('vagaro');
