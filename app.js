@@ -1448,6 +1448,14 @@ function renderEntryForm() {
         </div>
       </div>
       
+      <!-- Vagaro Income Employee Field (shown when category is Vagaro Income) -->
+      <div class="form-group hidden" id="vagaro-employee-field">
+        <label class="form-label">Employee</label>
+        <select class="form-select" id="entry-vagaro-employee">
+          ${(state.employees || ['Chasity McGill']).map(e => `<option value="${escapeHTML(e)}">${escapeHTML(e)}</option>`).join('')}
+        </select>
+      </div>
+      
       <div class="form-group" id="client-field">
         <label class="form-label">Client Name (optional)</label>
         <input type="text" class="form-input" id="entry-client" placeholder="Client name...">
@@ -1520,11 +1528,20 @@ function setEntryType(type) {
 function toggleEmployeePayFields() {
   const category = document.getElementById('entry-category').value;
   const employeeFields = document.getElementById('employee-pay-fields');
+  const vagaroEmployeeField = document.getElementById('vagaro-employee-field');
   
+  // Employee Pay fields (expense only)
   if (category === 'Employee Pay' && currentEntryType === 'EXPENSE') {
     employeeFields.classList.remove('hidden');
   } else {
     employeeFields.classList.add('hidden');
+  }
+  
+  // Vagaro Income employee field (income only)
+  if ((category === 'Vagaro Income' || category?.includes('Vagaro Income')) && currentEntryType === 'INCOME') {
+    vagaroEmployeeField?.classList.remove('hidden');
+  } else {
+    vagaroEmployeeField?.classList.add('hidden');
   }
 }
 
@@ -1556,6 +1573,11 @@ async function saveEntry() {
     record.tipAmount = tip;
     record.amount = service;
     record.clientName = client || null;
+    
+    // Add employee field for Vagaro Income
+    if (category === 'Vagaro Income' || category?.includes('Vagaro Income')) {
+      record.employee = document.getElementById('entry-vagaro-employee')?.value || 'Chasity McGill';
+    }
   } else {
     const amount = parseFloat(document.getElementById('entry-amount').value) || 0;
     if (amount <= 0) { showToast('Please enter an amount'); return; }
@@ -1581,8 +1603,12 @@ async function saveEntry() {
       document.getElementById('entry-service').value = '';
       document.getElementById('entry-tip').value = '';
       document.getElementById('entry-client').value = '';
+      // Reset and hide Vagaro employee field
+      document.getElementById('vagaro-employee-field')?.classList.add('hidden');
     } else {
       document.getElementById('entry-amount').value = '';
+      // Reset and hide employee pay fields
+      document.getElementById('employee-pay-fields')?.classList.add('hidden');
     }
     
     // Update date in state and refresh
