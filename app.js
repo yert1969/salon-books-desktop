@@ -1314,6 +1314,12 @@ function renderTransactionItem(t) {
   let categoryDisplay = escapeHTML(t.category);
   if (t.category === 'Vagaro Income' && t.employee) {
     categoryDisplay = `Vagaro Income (${escapeHTML(t.employee.split(' ')[0])})`;
+  } else if (t.category?.includes('Vagaro Income')) {
+    // Old format: "Chasity (Vagaro Income)" - extract name from category
+    const match = t.category.match(/^(\w+)\s*\(Vagaro Income\)$/);
+    if (match) {
+      categoryDisplay = `Vagaro Income (${escapeHTML(match[1])})`;
+    }
   } else if (t.category === 'Employee Pay' && t.employee) {
     const typeLabel = t.payType === 'taxes' ? '📋' : '💰';
     categoryDisplay = `Employee Pay — ${escapeHTML(t.employee.split(' ')[0])} ${typeLabel}`;
@@ -1644,8 +1650,8 @@ async function openEditTransactionModal(id) {
     </div>
     
     ${isIncome ? `
-      <!-- Vagaro Income Employee Field -->
-      <div class="form-group" id="edit-vagaro-employee-field" ${t.category === 'Vagaro Income' ? '' : 'style="display:none;"'}>
+      <!-- Vagaro Income Employee Field (show for both old and new category names) -->
+      <div class="form-group" id="edit-vagaro-employee-field" ${(t.category === 'Vagaro Income' || t.category?.includes('Vagaro Income')) ? '' : 'style="display:none;"'}>
         <label class="form-label">Employee</label>
         <select class="form-select" id="edit-vagaro-employee">
           ${(state.employees || ['Chasity McGill']).map(e => 
@@ -1737,7 +1743,8 @@ async function updateTransaction(id, isIncome) {
     changes.clientName = document.getElementById('edit-client').value.trim() || null;
     
     // Add employee field for Vagaro Income
-    if (category === 'Vagaro Income') {
+    // Add employee field for Vagaro Income (both old and new category names)
+    if (category === 'Vagaro Income' || category?.includes('Vagaro Income')) {
       changes.employee = document.getElementById('edit-vagaro-employee')?.value || 'Chasity McGill';
     } else {
       changes.employee = null;
