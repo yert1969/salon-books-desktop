@@ -199,6 +199,8 @@ const state = {
   boothRentYear: new Date().getFullYear(),
   // Direct cost categories (for P&L)
   directCostCategories: [],
+  // Employees for payroll
+  employees: ['Chasity McGill'],
 };
 
 // ----------------------------------------------------------------
@@ -437,6 +439,58 @@ async function saveCategories() {
       .set(state.categories);
   } catch(e) {
     console.error('Failed to sync categories to Firebase:', e);
+  }
+}
+
+async function loadEmployees() {
+  try {
+    // Try Firebase first
+    if (currentUser) {
+      const doc = await firestore.collection('users')
+        .doc(currentUser.uid)
+        .collection('settings')
+        .doc('employees')
+        .get();
+      
+      if (doc.exists && doc.data().list?.length) {
+        state.employees = doc.data().list;
+        return;
+      }
+    }
+    
+    // Try local storage
+    const saved = await db.settings.get('employees');
+    if (saved?.value) {
+      const parsed = JSON.parse(saved.value);
+      if (Array.isArray(parsed) && parsed.length) {
+        state.employees = parsed;
+        return;
+      }
+    }
+    
+    // Default
+    state.employees = ['Chasity McGill'];
+  } catch (e) {
+    console.warn('loadEmployees error:', e);
+    state.employees = ['Chasity McGill'];
+  }
+}
+
+async function saveEmployees() {
+  // Save locally
+  await db.settings.put({ key: 'employees', value: JSON.stringify(state.employees) });
+  
+  // Sync to Firebase
+  if (currentUser) {
+    try {
+      await firestore.collection('users')
+        .doc(currentUser.uid)
+        .collection('settings')
+        .doc('employees')
+        .set({ list: state.employees });
+    } catch (err) {
+      console.error('Failed to sync employees to Firebase:', err);
+    }
   }
 }
 
@@ -1354,10 +1408,29 @@ function renderEntryForm() {
       
       <div class="form-group">
         <label class="form-label">Category</label>
-        <select class="form-select" id="entry-category">
+        <select class="form-select" id="entry-category" onchange="toggleEmployeePayFields()">
           <option value="">Select category...</option>
           ${categoryOptions('INCOME')}
         </select>
+      </div>
+      
+      <!-- Employee Pay Fields (shown when category is Employee Pay) -->
+      <div class="form-group hidden" id="employee-pay-fields">
+        <div class="form-row">
+          <div class="form-group" style="flex:1;">
+            <label class="form-label">Employee</label>
+            <select class="form-select" id="entry-employee">
+              ${(state.employees || ['Chasity McGill']).map(e => `<option value="${escapeHTML(e)}">${escapeHTML(e)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label class="form-label">Type</label>
+            <select class="form-select" id="entry-paytype">
+              <option value="pay">💰 Pay</option>
+              <option value="taxes">📋 Taxes</option>
+            </select>
+          </div>
+        </div>
       </div>
       
       <div class="form-group" id="client-field">
@@ -1419,11 +1492,25 @@ function setEntryType(type) {
   document.getElementById('income-amounts').classList.toggle('hidden', type === 'EXPENSE');
   document.getElementById('expense-amount').classList.toggle('hidden', type === 'INCOME');
   
+  // Hide employee pay fields when switching types
+  document.getElementById('employee-pay-fields').classList.add('hidden');
+  
   // Update category options
   document.getElementById('entry-category').innerHTML = `
     <option value="">Select category...</option>
     ${categoryOptions(type)}
   `;
+}
+
+function toggleEmployeePayFields() {
+  const category = document.getElementById('entry-category').value;
+  const employeeFields = document.getElementById('employee-pay-fields');
+  
+  if (category === 'Employee Pay' && currentEntryType === 'EXPENSE') {
+    employeeFields.classList.remove('hidden');
+  } else {
+    employeeFields.classList.add('hidden');
+  }
 }
 
 async function saveEntry() {
@@ -1460,6 +1547,12 @@ async function saveEntry() {
     record.amount = amount;
     record.serviceAmount = 0;
     record.tipAmount = 0;
+    
+    // Add employee pay fields if applicable
+    if (category === 'Employee Pay') {
+      record.employee = document.getElementById('entry-employee')?.value || 'Chasity McGill';
+      record.payType = document.getElementById('entry-paytype')?.value || 'pay';
+    }
   }
   
   try {
@@ -1561,6 +1654,27 @@ async function openEditTransactionModal(id) {
         <label class="form-label">Amount ($)</label>
         <input type="number" class="form-input" id="edit-amount" value="${t.amount || 0}" step="0.01">
       </div>
+      
+      <!-- Employee Pay Fields -->
+      <div class="form-group" id="edit-employee-pay-fields" ${t.category === 'Employee Pay' ? '' : 'style="display:none;"'}>
+        <div class="form-row">
+          <div class="form-group" style="flex:1;">
+            <label class="form-label">Employee</label>
+            <select class="form-select" id="edit-employee">
+              ${(state.employees || ['Chasity McGill']).map(e => 
+                `<option value="${escapeHTML(e)}" ${e === (t.employee || 'Chasity McGill') ? 'selected' : ''}>${escapeHTML(e)}</option>`
+              ).join('')}
+            </select>
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label class="form-label">Type</label>
+            <select class="form-select" id="edit-paytype">
+              <option value="pay" ${(!t.payType || t.payType === 'pay') ? 'selected' : ''}>💰 Pay</option>
+              <option value="taxes" ${t.payType === 'taxes' ? 'selected' : ''}>📋 Taxes</option>
+            </select>
+          </div>
+        </div>
+      </div>
     `}
     
     <div class="form-group">
@@ -1604,6 +1718,15 @@ async function updateTransaction(id, isIncome) {
     changes.clientName = document.getElementById('edit-client').value.trim() || null;
   } else {
     changes.amount = parseFloat(document.getElementById('edit-amount').value) || 0;
+    
+    // Add employee pay fields if applicable
+    if (category === 'Employee Pay') {
+      changes.employee = document.getElementById('edit-employee')?.value || 'Chasity McGill';
+      changes.payType = document.getElementById('edit-paytype')?.value || 'pay';
+    } else {
+      changes.employee = null;
+      changes.payType = null;
+    }
   }
   
   try {
@@ -2501,6 +2624,7 @@ async function renderReportsView() {
     { id: 'category', label: 'By Category' },
     { id: 'pnl', label: 'P&L' },
     { id: 'boothrent', label: 'Booth Rent' },
+    { id: 'employee', label: '👩‍💼 Employee' },
     { id: 'clients', label: 'Clients' },
     { id: 'export', label: '📥 Export' },
   ];
@@ -2543,6 +2667,7 @@ async function renderReport(type) {
     case 'category': await renderCategoryReport(output, controls); break;
     case 'pnl': await renderPnLReport(output, controls); break;
     case 'boothrent': await renderBoothRentReport(output, controls); break;
+    case 'employee': await renderEmployeeReport(output, controls); break;
     case 'clients': await renderClientsReport(output, controls); break;
     case 'export': await renderExportReport(output, controls); break;
     default: output.innerHTML = '<p>Select a report type</p>';
@@ -3490,6 +3615,261 @@ async function renderYOYReport(output, controls) {
   `;
 }
 
+// Employee Report
+async function renderEmployeeReport(output, controls) {
+  const year = state.selectedYear || new Date().getFullYear();
+  const period = state.employeeReportPeriod || 'ytd';
+  const employeeName = state.employeeReportEmployee || (state.employees?.[0] || 'Chasity McGill');
+  
+  // Build employee options
+  const employeeOpts = (state.employees || ['Chasity McGill']).map(e => 
+    `<option value="${escapeHTML(e)}" ${e === employeeName ? 'selected' : ''}>${escapeHTML(e)}</option>`
+  ).join('');
+  
+  controls.innerHTML = `
+    <select class="form-input" style="width:180px;" onchange="state.employeeReportEmployee=this.value;renderReport('employee')">
+      ${employeeOpts}
+    </select>
+    <select class="form-input" style="width:150px;" onchange="state.employeeReportPeriod=this.value;renderReport('employee')">
+      <option value="ytd" ${period === 'ytd' ? 'selected' : ''}>Year to Date</option>
+      <option value="q1" ${period === 'q1' ? 'selected' : ''}>Q1 (Jan-Mar)</option>
+      <option value="q2" ${period === 'q2' ? 'selected' : ''}>Q2 (Apr-Jun)</option>
+      <option value="q3" ${period === 'q3' ? 'selected' : ''}>Q3 (Jul-Sep)</option>
+      <option value="q4" ${period === 'q4' ? 'selected' : ''}>Q4 (Oct-Dec)</option>
+      <option value="last30" ${period === 'last30' ? 'selected' : ''}>Last 30 Days</option>
+      <option value="all" ${period === 'all' ? 'selected' : ''}>All Time</option>
+    </select>
+    <select class="form-input" style="width:100px;" onchange="state.selectedYear=parseInt(this.value);renderReport('employee')">
+      ${[2024, 2025, 2026, 2027].map(y => `<option value="${y}" ${y === year ? 'selected' : ''}>${y}</option>`).join('')}
+    </select>
+  `;
+  
+  // Calculate date range
+  let startDate, endDate;
+  switch (period) {
+    case 'q1': startDate = `${year}-01-01`; endDate = `${year}-03-31`; break;
+    case 'q2': startDate = `${year}-04-01`; endDate = `${year}-06-30`; break;
+    case 'q3': startDate = `${year}-07-01`; endDate = `${year}-09-30`; break;
+    case 'q4': startDate = `${year}-10-01`; endDate = `${year}-12-31`; break;
+    case 'last30':
+      endDate = todayStr();
+      const d = new Date(); d.setDate(d.getDate() - 30);
+      startDate = d.toISOString().split('T')[0];
+      break;
+    case 'all': startDate = '2020-01-01'; endDate = '2099-12-31'; break;
+    case 'ytd': default: startDate = `${year}-01-01`; endDate = todayStr(); break;
+  }
+  
+  // Get all transactions
+  const allTxns = await db.transactions.toArray();
+  
+  // Filter income from this employee
+  // NEW: category === 'Vagaro Income' && employee === employeeName
+  // LEGACY: category === 'Chasity (Vagaro Income)' (for backward compatibility)
+  const legacyCategory = `${employeeName.split(' ')[0]} (Vagaro Income)`;
+  const incomeTxns = allTxns.filter(t => 
+    t.type === 'INCOME' && 
+    t.date >= startDate && 
+    t.date <= endDate &&
+    (
+      // New format: Vagaro Income + employee field
+      (t.category === 'Vagaro Income' && t.employee === employeeName) ||
+      // Legacy format: Chasity (Vagaro Income)
+      t.category === legacyCategory
+    )
+  );
+  
+  // Calculate income totals
+  let cardServices = 0, cashServices = 0, totalTips = 0;
+  const weeklyData = {};
+  
+  function getWeekStart(dateStr) {
+    const d = new Date(dateStr + 'T12:00:00');
+    const day = d.getDay();
+    d.setDate(d.getDate() - day);
+    return d.toISOString().split('T')[0];
+  }
+  
+  incomeTxns.forEach(t => {
+    const weekStart = getWeekStart(t.date);
+    if (!weeklyData[weekStart]) weeklyData[weekStart] = { services: 0, tips: 0, pay: 0, taxes: 0 };
+    
+    const serviceAmt = t.serviceAmount || t.amount || 0;
+    weeklyData[weekStart].services += serviceAmt;
+    
+    if (t.paymentMethod === 'Cash') {
+      cashServices += serviceAmt;
+    } else {
+      cardServices += serviceAmt;
+    }
+    
+    // Check employeeTips field (from Vagaro import)
+    if (t.employeeTips) {
+      totalTips += t.employeeTips;
+      weeklyData[weekStart].tips += t.employeeTips;
+    }
+    // Also extract tips from notes
+    else {
+      const tipMatch = t.notes?.match(/Tips:\s*\$?([\d.]+)/i);
+      if (tipMatch) {
+        const tipAmt = parseFloat(tipMatch[1]) || 0;
+        totalTips += tipAmt;
+        weeklyData[weekStart].tips += tipAmt;
+      }
+    }
+  });
+  
+  const totalServices = cardServices + cashServices;
+  
+  // Filter expenses for this employee
+  const expenseTxns = allTxns.filter(t => 
+    t.type === 'EXPENSE' && 
+    t.category === 'Employee Pay' &&
+    t.date >= startDate && 
+    t.date <= endDate &&
+    (t.employee === employeeName || (!t.employee && employeeName === 'Chasity McGill'))
+  );
+  
+  let totalPay = 0, totalTaxes = 0;
+  
+  expenseTxns.forEach(t => {
+    const weekStart = getWeekStart(t.date);
+    if (!weeklyData[weekStart]) weeklyData[weekStart] = { services: 0, tips: 0, pay: 0, taxes: 0 };
+    
+    const amt = t.amount || 0;
+    
+    if (t.payType === 'taxes' || (t.notes && t.notes.toLowerCase().includes('tax'))) {
+      totalTaxes += amt;
+      weeklyData[weekStart].taxes += amt;
+    } else {
+      totalPay += amt;
+      weeklyData[weekStart].pay += amt;
+    }
+  });
+  
+  const totalCost = totalPay + totalTaxes;
+  const netProfit = totalServices - totalCost;
+  const profitMargin = totalServices > 0 ? ((netProfit / totalServices) * 100).toFixed(1) : 0;
+  
+  // Sort weeks for display
+  const sortedWeeks = Object.keys(weeklyData).sort().reverse();
+  const weeksWorked = sortedWeeks.filter(w => weeklyData[w].services > 0 || weeklyData[w].pay > 0).length;
+  
+  // Period label
+  const periodLabels = {
+    'ytd': `Year to Date ${year}`, 'q1': `Q1 ${year}`, 'q2': `Q2 ${year}`,
+    'q3': `Q3 ${year}`, 'q4': `Q4 ${year}`, 'last30': 'Last 30 Days', 'all': 'All Time'
+  };
+  
+  output.innerHTML = `
+    <div style="max-width:900px; margin:0 auto;">
+      <div style="text-align:center; margin-bottom:24px;">
+        <h2 style="margin:0; color:var(--plum);">${escapeHTML(employeeName)}</h2>
+        <div style="color:var(--text-muted);">${periodLabels[period] || period}</div>
+      </div>
+      
+      <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:20px; margin-bottom:24px;">
+        <!-- Revenue Card -->
+        <div style="background:linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding:20px; border-radius:12px;">
+          <h4 style="margin:0 0 16px 0; color:#155724;">💰 Service Revenue</h4>
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span>💳 Card</span><strong>${fmt(cardServices)}</strong>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+            <span>💵 Cash</span><strong>${fmt(cashServices)}</strong>
+          </div>
+          <div style="border-top:2px dashed #155724; padding-top:12px; display:flex; justify-content:space-between; font-size:18px; font-weight:700; color:#155724;">
+            <span>Total</span><span>${fmt(totalServices)}</span>
+          </div>
+        </div>
+        
+        <!-- Tips Card -->
+        <div style="background:linear-gradient(135deg, #fff3cd 0%, #ffeeba 100%); padding:20px; border-radius:12px;">
+          <h4 style="margin:0 0 16px 0; color:#856404;">💝 Tips Earned</h4>
+          <div style="font-size:28px; font-weight:700; color:#856404; margin-bottom:8px;">${fmt(totalTips)}</div>
+          <div style="font-size:12px; color:#856404;">Kept 100% by ${escapeHTML(employeeName.split(' ')[0])}</div>
+        </div>
+        
+        <!-- Expenses Card -->
+        <div style="background:linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); padding:20px; border-radius:12px;">
+          <h4 style="margin:0 0 16px 0; color:#721c24;">📤 Salon Expenses</h4>
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span>💰 Pay</span><strong>${fmt(totalPay)}</strong>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+            <span>📋 Taxes</span><strong>${fmt(totalTaxes)}</strong>
+          </div>
+          <div style="border-top:2px dashed #721c24; padding-top:12px; display:flex; justify-content:space-between; font-size:18px; font-weight:700; color:#721c24;">
+            <span>Total Cost</span><span>${fmt(totalCost)}</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Net Profit Banner -->
+      <div style="background:var(--plum); color:#fff; padding:24px; border-radius:12px; display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
+        <div>
+          <div style="font-size:14px; opacity:0.9;">Net Profit to Annette</div>
+          <div style="font-size:12px; opacity:0.7;">${profitMargin}% margin</div>
+        </div>
+        <div style="font-size:32px; font-weight:700;">${fmt(netProfit)}</div>
+      </div>
+      
+      <!-- Stats Grid -->
+      <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:24px;">
+        <div style="background:var(--bg-card); padding:16px; border-radius:8px; text-align:center; border:1px solid var(--border);">
+          <div style="font-size:28px; font-weight:700; color:var(--plum);">${weeksWorked}</div>
+          <div style="font-size:12px; color:var(--text-muted);">Weeks Worked</div>
+        </div>
+        <div style="background:var(--bg-card); padding:16px; border-radius:8px; text-align:center; border:1px solid var(--border);">
+          <div style="font-size:28px; font-weight:700; color:var(--plum);">${fmt(weeksWorked > 0 ? netProfit / weeksWorked : 0)}</div>
+          <div style="font-size:12px; color:var(--text-muted);">Avg Weekly Profit</div>
+        </div>
+        <div style="background:var(--bg-card); padding:16px; border-radius:8px; text-align:center; border:1px solid var(--border);">
+          <div style="font-size:28px; font-weight:700; color:#C4956A;">${fmt(weeksWorked > 0 ? totalTips / weeksWorked : 0)}</div>
+          <div style="font-size:12px; color:var(--text-muted);">Avg Weekly Tips</div>
+        </div>
+        <div style="background:var(--bg-card); padding:16px; border-radius:8px; text-align:center; border:1px solid var(--border);">
+          <div style="font-size:28px; font-weight:700; color:#27ae60;">${fmt(weeksWorked > 0 ? totalServices / weeksWorked : 0)}</div>
+          <div style="font-size:12px; color:var(--text-muted);">Avg Weekly Revenue</div>
+        </div>
+      </div>
+      
+      ${sortedWeeks.length > 0 ? `
+        <!-- Weekly Breakdown Table -->
+        <h3 style="margin-bottom:12px;">Weekly Breakdown</h3>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Week</th>
+              <th style="text-align:right;">Revenue</th>
+              <th style="text-align:right;">Tips</th>
+              <th style="text-align:right;">Pay</th>
+              <th style="text-align:right;">Taxes</th>
+              <th style="text-align:right;">Net Profit</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sortedWeeks.filter(w => weeklyData[w].services > 0 || weeklyData[w].pay > 0).slice(0, 26).map(week => {
+              const w = weeklyData[week];
+              const weekNet = w.services - w.pay - w.taxes;
+              return `
+                <tr>
+                  <td>${formatDateShort(week)}</td>
+                  <td style="text-align:right;">${fmt(w.services)}</td>
+                  <td style="text-align:right; color:#C4956A;">${fmt(w.tips)}</td>
+                  <td style="text-align:right;">${fmt(w.pay)}</td>
+                  <td style="text-align:right;">${fmt(w.taxes)}</td>
+                  <td style="text-align:right; font-weight:600; color:${weekNet >= 0 ? '#27ae60' : '#e74c3c'};">${fmt(weekNet)}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      ` : '<p style="text-align:center; color:var(--text-muted);">No data for this period</p>'}
+    </div>
+  `;
+}
+
 // Clients Report
 async function renderClientsReport(output, controls) {
   const sortBy = state.clientsReportSort || 'total';
@@ -3739,6 +4119,7 @@ async function renderSettingsView() {
       <div class="settings-nav">
         <button class="settings-nav-item active" onclick="showSettingsSection('general')">General</button>
         <button class="settings-nav-item" onclick="showSettingsSection('categories')">Categories</button>
+        <button class="settings-nav-item" onclick="showSettingsSection('employees')">Employees</button>
         <button class="settings-nav-item" onclick="showSettingsSection('vagaro')">Vagaro Import</button>
         <button class="settings-nav-item" onclick="showSettingsSection('security')">Security</button>
         <button class="settings-nav-item" onclick="showSettingsSection('data')">Data & Backup</button>
@@ -3792,6 +4173,8 @@ function showSettingsSection(section) {
     renderSettingsView();
   } else if (section === 'categories') {
     renderCategoriesSettings(container);
+  } else if (section === 'employees') {
+    renderEmployeesSettings(container);
   } else if (section === 'vagaro') {
     renderVagaroImportSettings(container);
   } else if (section === 'security') {
@@ -3849,6 +4232,72 @@ async function renderCategoriesSettings(container) {
       </div>
     </div>
   `;
+}
+
+async function renderEmployeesSettings(container) {
+  const sortedEmployees = [...(state.employees || ['Chasity McGill'])].sort((a, b) => a.localeCompare(b));
+  
+  container.innerHTML = `
+    <div class="settings-section">
+      <div class="settings-section-title">Employees</div>
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">
+        Manage employees for payroll tracking. Use with "Employee Pay" expense entries to track pay and taxes by employee.
+      </p>
+      <div class="category-chips" id="employee-chips">
+        ${sortedEmployees.map(name => {
+          const escapedName = name.replace(/'/g, "\\'");
+          return `<div class="category-chip" style="background:var(--plum);color:#fff;">${escapeHTML(name)}<button class="chip-delete" style="color:#fff;" onclick="deleteEmployee('${escapedName}')">×</button></div>`;
+        }).join('')}
+      </div>
+      <div class="add-category-row">
+        <input type="text" class="add-category-input" id="add-employee" placeholder="Employee name...">
+        <button class="btn-add-chip" onclick="addEmployee()">Add</button>
+      </div>
+    </div>
+    
+    <div class="settings-section" style="margin-top:32px;">
+      <div class="settings-section-title">Employee Report</div>
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+        View detailed employee financials in <strong>Reports → 👩‍💼 Employee</strong>
+      </p>
+      <ul style="font-size:13px;color:var(--text-muted);margin:0;padding-left:20px;line-height:1.8;">
+        <li>Service revenue generated (from Vagaro imports)</li>
+        <li>Tips earned (kept 100% by employee)</li>
+        <li>Pay and employer taxes (from "Employee Pay" expenses)</li>
+        <li>Net profit to salon with weekly breakdown</li>
+      </ul>
+    </div>
+  `;
+}
+
+async function addEmployee() {
+  const input = document.getElementById('add-employee');
+  const name = input?.value.trim();
+  
+  if (!name) return;
+  if (state.employees.includes(name)) {
+    showToast('Employee already exists');
+    return;
+  }
+  
+  state.employees.push(name);
+  await saveEmployees();
+  
+  input.value = '';
+  showToast('Employee added ✓');
+  renderEmployeesSettings(document.getElementById('settings-section'));
+}
+
+async function deleteEmployee(name) {
+  if (!confirm(`Remove "${name}" from employee list?`)) return;
+  
+  const idx = state.employees.indexOf(name);
+  if (idx >= 0) {
+    state.employees.splice(idx, 1);
+    await saveEmployees();
+    showToast('Employee removed');
+    renderEmployeesSettings(document.getElementById('settings-section'));
+  }
 }
 
 async function toggleDirectCost(category) {
@@ -4123,18 +4572,27 @@ let vagaroImportState = {
 
 async function renderVagaroImportSettings(container) {
   const lastImport = (await db.settings.get('lastVagaroImport'))?.value;
+  const employees = state.employees || ['Chasity McGill'];
   
   container.innerHTML = `
     <div class="settings-section">
       <div class="settings-section-title">Vagaro Employee Import</div>
       <p style="color:var(--text-muted);margin-bottom:20px;line-height:1.5;">
-        Import Chasity's weekly <strong>service revenue</strong> from Vagaro. 
-        Tips are tracked separately (Chasity keeps 100%).
+        Import employee <strong>service revenue</strong> from Vagaro. 
+        Tips are tracked separately (employee keeps 100%).
       </p>
       
       ${lastImport ? `<div style="background:var(--success-bg);padding:10px 14px;border-radius:8px;margin-bottom:20px;font-size:13px;color:var(--success);">
         ✓ Last import: ${escapeHTML(lastImport)}
       </div>` : ''}
+      
+      <div class="form-group" style="margin-bottom:20px;">
+        <label class="form-label">Employee</label>
+        <select class="form-select" id="vagaro-employee" style="width:100%;">
+          ${employees.map(e => `<option value="${escapeHTML(e)}">${escapeHTML(e)}</option>`).join('')}
+        </select>
+        ${employees.length === 1 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Add more employees in Settings → Employees</div>` : ''}
+      </div>
       
       <div class="vagaro-upload-card" id="upload-txn" style="margin-bottom:24px;">
         <div class="vagaro-upload-icon">📋</div>
@@ -4180,6 +4638,8 @@ async function handleVagaroTransactionList(file) {
     
     // Parse the transaction list
     const parsed = parseTransactionList(json);
+    // Add selected employee from dropdown
+    parsed.employee = document.getElementById('vagaro-employee')?.value || 'Chasity McGill';
     vagaroImportState.parsedData = parsed;
     showVagaroPreview(parsed);
     
@@ -4334,7 +4794,7 @@ function showVagaroPreview(parsed) {
           <span style="font-weight:600;">${fmt(parsed.cashServices)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:13px;color:var(--text-muted);">
-          <span style="padding-left:20px;">↳ Collected by Chasity (still salon revenue)</span>
+          <span style="padding-left:20px;">↳ Collected by ${escapeHTML(parsed.employee || 'employee')} (still salon revenue)</span>
         </div>
         
         <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px dashed var(--border);padding-top:10px;margin-top:10px;font-size:17px;">
@@ -4344,7 +4804,7 @@ function showVagaroPreview(parsed) {
       </div>
       
       <div style="background:var(--cream);padding:16px;border-radius:10px;margin-bottom:16px;">
-        <div style="font-weight:600;margin-bottom:12px;color:var(--text-muted);">💝 Tips (Chasity keeps 100%)</div>
+        <div style="font-weight:600;margin-bottom:12px;color:var(--text-muted);">💝 Tips (${escapeHTML(parsed.employee || 'Employee')} keeps 100%)</div>
         
         <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:14px;">
           <span>Card tips</span>
@@ -4366,8 +4826,8 @@ function showVagaroPreview(parsed) {
       <div style="padding:12px;background:var(--info-bg);border-radius:8px;font-size:13px;color:var(--text-muted);">
         <strong>What will be created:</strong>
         <ul style="margin:8px 0 0 16px;padding:0;">
-          <li>1 Income: "Chasity (Vagaro Income)" — ${fmt(parsed.cardServices)} Card</li>
-          <li>1 Income: "Chasity (Vagaro Income)" — ${fmt(parsed.cashServices)} Cash</li>
+          <li>1 Income: "Vagaro Income" (${escapeHTML(parsed.employee)}) — ${fmt(parsed.cardServices)} Card</li>
+          <li>1 Income: "Vagaro Income" (${escapeHTML(parsed.employee)}) — ${fmt(parsed.cashServices)} Cash</li>
         </ul>
         <div style="margin-top:8px;font-size:12px;">
           ${parsed.transactionCount} transactions from ${escapeHTML(parsed.payPeriod)}
@@ -4397,13 +4857,15 @@ async function commitVagaroImport() {
   try {
     const txnDate = parsed.payPeriodEnd || todayStr();
     const periodNote = parsed.payPeriod || 'Pay period';
+    const employeeName = parsed.employee || 'Chasity McGill';
     
     // Create income transaction for CARD services
     if (parsed.cardServices > 0) {
       await db.transactions.add({
         date: txnDate,
         type: 'INCOME',
-        category: 'Chasity (Vagaro Income)',
+        category: 'Vagaro Income',
+        employee: employeeName,
         serviceAmount: parsed.cardServices,
         tipAmount: 0,
         employeeTips: parsed.cardTips,  // Store tips for reporting (not income)
@@ -4419,7 +4881,8 @@ async function commitVagaroImport() {
       await db.transactions.add({
         date: txnDate,
         type: 'INCOME',
-        category: 'Chasity (Vagaro Income)',
+        category: 'Vagaro Income',
+        employee: employeeName,
         serviceAmount: parsed.cashServices,
         tipAmount: 0,
         employeeTips: parsed.cashTips,  // Store tips for reporting (not income)
@@ -4431,15 +4894,15 @@ async function commitVagaroImport() {
     }
     
     // Ensure category exists
-    if (!state.categories.INCOME.includes('Chasity (Vagaro Income)')) {
-      state.categories.INCOME.push('Chasity (Vagaro Income)');
+    if (!state.categories.INCOME.includes('Vagaro Income')) {
+      state.categories.INCOME.push('Vagaro Income');
       await saveCategories();
     }
     
     // Save last import info
     await db.settings.put({ 
       key: 'lastVagaroImport', 
-      value: `${todayStr()} — ${periodNote} (Services: ${fmt(parsed.totalServices)}, Tips: ${fmt(parsed.totalTips)})`
+      value: `${todayStr()} — ${employeeName} — ${periodNote} (Services: ${fmt(parsed.totalServices)}, Tips: ${fmt(parsed.totalTips)})`
     });
     
     showToast('Import successful! ✓');
@@ -5020,6 +5483,9 @@ async function bootApp() {
   
   // Load categories
   await loadCategories();
+  
+  // Load employees
+  await loadEmployees();
   
   // Check renters tab visibility
   await updateRentersTabVisibility();
