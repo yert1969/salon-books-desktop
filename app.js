@@ -3777,7 +3777,9 @@ async function renderSettingsView() {
 
 function showSettingsSection(section) {
   document.querySelectorAll('.settings-nav-item').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
+  if (typeof event !== 'undefined' && event && event.target) {
+    event.target.classList.add('active');
+  }
   
   const container = document.getElementById('settings-section');
   
