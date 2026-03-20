@@ -4406,9 +4406,10 @@ async function commitVagaroImport() {
         category: 'Chasity (Vagaro Income)',
         serviceAmount: parsed.cardServices,
         tipAmount: 0,
+        employeeTips: parsed.cardTips,  // Store tips for reporting (not income)
         paymentMethod: 'Card',
         clientName: '',
-        notes: `[Vagaro Import] Card services — ${periodNote} (Tips: ${fmt(parsed.cardTips)} kept by Chasity)`,
+        notes: `[Vagaro Import] Card services — ${periodNote}`,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
@@ -4421,9 +4422,10 @@ async function commitVagaroImport() {
         category: 'Chasity (Vagaro Income)',
         serviceAmount: parsed.cashServices,
         tipAmount: 0,
+        employeeTips: parsed.cashTips,  // Store tips for reporting (not income)
         paymentMethod: 'Cash',
         clientName: '',
-        notes: `[Vagaro Import] Cash services — ${periodNote} (Tips: ${fmt(parsed.cashTips)} kept by Chasity)`,
+        notes: `[Vagaro Import] Cash services — ${periodNote}`,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
