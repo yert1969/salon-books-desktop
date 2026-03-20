@@ -4389,7 +4389,7 @@ async function commitVagaroImport() {
   }
   
   const confirmed = await confirmDialog(
-    `Import service revenue for ${parsed.payPeriod || 'this pay period'}?\\n\\nCard: ${fmt(parsed.cardServices)}\\nCash: ${fmt(parsed.cashServices)}\\nTotal: ${fmt(parsed.totalServices)}`,
+    `Import service revenue for ${parsed.payPeriod || 'this pay period'}?<br><br>Card: ${fmt(parsed.cardServices)}<br>Cash: ${fmt(parsed.cashServices)}<br><strong>Total: ${fmt(parsed.totalServices)}</strong>`,
     'Confirm Import'
   );
   if (!confirmed) return;
