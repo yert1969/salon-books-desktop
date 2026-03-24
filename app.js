@@ -5665,12 +5665,83 @@ async function buildBusinessSnapshot() {
     };
   });
   
-  // Build readable snapshot string (like mobile)
+  // P&L summary (YTD and current month)
+  const directCatsDoc = await db.settings.get('directCostCategories');
+  const directCats = directCatsDoc?.value ? JSON.parse(directCatsDoc.value) : [];
+  const isDirect = cat => directCats.includes(cat);
+
+  const buildPnl = (filterTxns, filterMExp, filterRentPmts) => {
+    const revLines = {}, dirLines = {}, ovhLines = {};
+    filterTxns.filter(t => t.type === 'INCOME').forEach(t => {
+      const k = t.category || 'Other';
+      if (!revLines[k]) revLines[k] = 0;
+      revLines[k] += (t.serviceAmount || 0);
+    });
+    const tips = filterTxns.filter(t => t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
+    const rent = filterRentPmts.reduce((s,p)=>s+(p.amount||0),0);
+    const grossRev = Object.values(revLines).reduce((s,v)=>s+v,0) + tips + rent;
+    filterTxns.filter(t => t.type==='EXPENSE').forEach(t => {
+      const k = t.category||'Other', b = isDirect(k)?dirLines:ovhLines;
+      if (!b[k]) b[k]=0; b[k]+=(t.amount||0);
+    });
+    filterMExp.forEach(e => {
+      const k = e.category||'Other', b = isDirect(k)?dirLines:ovhLines;
+      if (!b[k]) b[k]=0; b[k]+=(e.amount||0);
+    });
+    const totalDirect  = Object.values(dirLines).reduce((s,v)=>s+v,0);
+    const totalOverhead= Object.values(ovhLines).reduce((s,v)=>s+v,0);
+    const grossProfit  = grossRev - totalDirect;
+    const netIncome    = grossRev - totalDirect - totalOverhead;
+    const pct = (v,t) => t>0 ? `(${((v/t)*100).toFixed(1)}%)` : '';
+    return {
+      revenue: Object.entries(revLines).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`  ${k}: $${Math.round(v)}`).join('\n'),
+      tips: Math.round(tips), rent: Math.round(rent),
+      grossRevenue: Math.round(grossRev),
+      directCosts: Object.entries(dirLines).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`  ${k}: $${Math.round(v)}`).join('\n') || '  None',
+      totalDirect: Math.round(totalDirect),
+      grossProfit: Math.round(grossProfit), grossMargin: pct(grossProfit, grossRev),
+      overhead: Object.entries(ovhLines).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`  ${k}: $${Math.round(v)}`).join('\n') || '  None',
+      totalOverhead: Math.round(totalOverhead),
+      netIncome: Math.round(netIncome), netMargin: pct(netIncome, grossRev),
+    };
+  };
+
+  const curMonthStr = `${curYear}-${String(curMonth).padStart(2,'0')}`;
+  const ytdPnl = buildPnl(
+    txns.filter(t => t.date?.startsWith(yearStr)),
+    mExp.filter(e => e.year === curYear),
+    rentPmts.filter(p => p.datePaid?.startsWith(yearStr))
+  );
+  const monthPnl = buildPnl(
+    txns.filter(t => t.date?.startsWith(curMonthStr)),
+    mExp.filter(e => e.year === curYear && e.month === curMonth),
+    rentPmts.filter(p => p.datePaid?.startsWith(curMonthStr))
+  );
+
+  // Build readable snapshot string
   const snapshot = `
 BUSINESS SNAPSHOT (as of ${now.toLocaleDateString()}):
 
 MONTHLY PERFORMANCE (last 6 months):
 ${monthlySummaries.map(m => `${m.month} ${m.year}: Income $${m.totalIncome} (Services $${m.services}, Tips $${m.tips}, Rent $${m.rentCollected}) | Expenses $${m.totalExpenses} | Net $${m.netProfit} | Unique clients: ${m.uniqueClients}`).join('\n')}
+
+P&L — YEAR TO DATE ${curYear}:
+Revenue by category:
+${ytdPnl.revenue}
+  Tips: $${ytdPnl.tips}
+  Booth Rent Collected: $${ytdPnl.rent}
+TOTAL REVENUE: $${ytdPnl.grossRevenue}
+Direct Costs (COGS):
+${ytdPnl.directCosts}
+  Total Direct: $${ytdPnl.totalDirect}
+GROSS PROFIT: $${ytdPnl.grossProfit} ${ytdPnl.grossMargin}
+Operating Expenses (Overhead):
+${ytdPnl.overhead}
+  Total Overhead: $${ytdPnl.totalOverhead}
+NET INCOME: $${ytdPnl.netIncome} ${ytdPnl.netMargin}
+
+P&L — ${monthName(curMonth)} ${curYear} (current month):
+TOTAL REVENUE: $${monthPnl.grossRevenue} | GROSS PROFIT: $${monthPnl.grossProfit} ${monthPnl.grossMargin} | NET INCOME: $${monthPnl.netIncome} ${monthPnl.netMargin}
 
 TOP SERVICE CATEGORIES (YTD by revenue):
 ${topServices.map(s => `${s.category}: $${Math.round(s.total)} (${s.count} transactions, $${Math.round(s.tips)} in tips)`).join('\n')}
