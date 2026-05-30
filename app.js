@@ -592,7 +592,7 @@ function wasRecentlyShown(key) {
   return Date.now() - data[key] < 24 * 60 * 60 * 1000;
 }
 
-async function generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts) {
+async function generateSmartInsights(allTxns, allRenters, allRentPmts) {
   const insights = [];
   const now = new Date();
   const today = todayStr();
@@ -602,14 +602,10 @@ async function generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts) 
   const lastMonth = `${now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear()}-${String(now.getMonth() === 0 ? 12 : now.getMonth()).padStart(2, '0')}`;
   const thisYear = String(now.getFullYear());
   const lastYear = String(now.getFullYear() - 1);
-  
+
   // Helper to calculate income for a period
   const incomeFor = (txns) => txns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
-  const expenseFor = (txns, mExp) => {
-    const daily = txns.filter(t => t.type === 'EXPENSE').reduce((s,t) => s + (t.amount||0), 0);
-    const monthly = mExp.reduce((s,e) => s + (e.amount||0), 0);
-    return daily + monthly;
-  };
+  const expenseFor = (txns) => txns.filter(t => t.type === 'EXPENSE').reduce((s,t) => s + (t.amount||0), 0);
   
   // This month vs last month pace
   const thisMonthTxns = allTxns.filter(t => t.date?.startsWith(thisMonth));
@@ -857,37 +853,33 @@ async function renderDashboard() {
   const isCurrentMonth = viewYear === now.getFullYear() && viewMonth === now.getMonth() + 1;
   
   // Fetch all data
-  const [allTxns, allMExp, allRenters, allRentPmts, allSums] = await Promise.all([
+  const [allTxns, allRenters, allRentPmts, allSums] = await Promise.all([
     db.transactions.toArray(),
-    db.monthlyExpenses.toArray(),
     db.renters.toArray(),
     db.rentPayments.toArray(),
     db.dailySummary.toArray()
   ]);
-  
+
   // Month calculations
-  const mTxns = allTxns.filter(t => t.date?.startsWith(monthStr));
-  const mIncome = mTxns.filter(t => t.type === 'INCOME');
+  const mTxns    = allTxns.filter(t => t.date?.startsWith(monthStr));
+  const mIncome  = mTxns.filter(t => t.type === 'INCOME');
   const mExpenses = mTxns.filter(t => t.type === 'EXPENSE');
-  const mMonthlyExp = allMExp.filter(e => e.year === viewYear && e.month === viewMonth);
-  
-  const mtdServices = mIncome.reduce((s,t) => s + (t.serviceAmount||0), 0);
-  const mtdTips = mIncome.reduce((s,t) => s + (t.tipAmount||0), 0);
-  const mtdIncome = mtdServices + mtdTips;
-  const mtdDailyExp = mExpenses.reduce((s,t) => s + (t.amount||0), 0);
-  const mtdMonthlyExp = mMonthlyExp.reduce((s,e) => s + (e.amount||0), 0);
-  const mtdExpenses = mtdDailyExp + mtdMonthlyExp;
-  const mtdNet = mtdIncome - mtdExpenses;
-  const mtdMargin = mtdIncome > 0 ? Math.round((mtdNet / mtdIncome) * 100) : 0;
-  
+
+  const mtdServices   = mIncome.reduce((s,t) => s + (t.serviceAmount||0), 0);
+  const mtdTips       = mIncome.reduce((s,t) => s + (t.tipAmount||0), 0);
+  const mtdIncome     = mtdServices + mtdTips;
+  const mtdDailyExp   = mExpenses.filter(t => !t.recurring).reduce((s,t) => s + (t.amount||0), 0);
+  const mtdMonthlyExp = mExpenses.filter(t => t.recurring).reduce((s,t) => s + (t.amount||0), 0);
+  const mtdExpenses   = mtdDailyExp + mtdMonthlyExp;
+  const mtdNet        = mtdIncome - mtdExpenses;
+  const mtdMargin     = mtdIncome > 0 ? Math.round((mtdNet / mtdIncome) * 100) : 0;
+
   // YTD calculations
-  const yearStr = String(viewYear);
-  const ytdIncome = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'INCOME')
+  const yearStr      = String(viewYear);
+  const ytdIncome    = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'INCOME')
     .reduce((s,t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
-  const ytdDailyExp = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'EXPENSE')
+  const ytdExpenses  = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'EXPENSE')
     .reduce((s,t) => s + (t.amount||0), 0);
-  const ytdMonthlyExp = allMExp.filter(e => e.year === viewYear).reduce((s,e) => s + (e.amount||0), 0);
-  const ytdExpenses = ytdDailyExp + ytdMonthlyExp;
   
   // Week pace
   const today = todayStr();
@@ -930,7 +922,7 @@ async function renderDashboard() {
   // Generate smart insights (only on current month view)
   let insightsHTML = '';
   if (isCurrentMonth) {
-    const insights = await generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts);
+    const insights = await generateSmartInsights(allTxns, allRenters, allRentPmts);
     if (insights.length > 0) {
       const insightItems = insights.map(i => {
         const bgColor = i.type === 'success' ? 'rgba(46, 125, 50, 0.08)' 
@@ -1079,8 +1071,7 @@ async function renderEntriesView() {
       <div class="entries-main">
         <!-- View Mode Tabs -->
         <div class="view-tabs">
-          <button class="view-tab ${state.entriesViewMode === 'daily' ? 'active' : ''}" onclick="switchEntriesView('daily')">Daily</button>
-          <button class="view-tab ${state.entriesViewMode === 'monthly' ? 'active' : ''}" onclick="switchEntriesView('monthly')">Monthly</button>
+          <button class="view-tab ${state.entriesViewMode !== 'all' ? 'active' : ''}" onclick="switchEntriesView('daily')">Daily</button>
           <button class="view-tab ${state.entriesViewMode === 'all' ? 'active' : ''}" onclick="switchEntriesView('all')">All Entries</button>
         </div>
         
@@ -1239,18 +1230,6 @@ async function renderMonthlyEntries(container) {
 
 async function renderAllEntries(container) {
   let allTransactions = await db.transactions.toArray();
-  const allMonthly = await db.monthlyExpenses.toArray();
-
-  // Normalize monthly expenses
-  allMonthly.forEach(e => {
-    allTransactions.push({
-      ...e,
-      _isMonthly: true,
-      type: 'EXPENSE',
-      date: `${e.year}-${String(e.month).padStart(2,'0')}-01`,
-      amount: e.amount || 0,
-    });
-  });
 
   // Sort by date descending
   allTransactions.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -1358,11 +1337,15 @@ function renderTransactionItem(t) {
     categoryDisplay = `Employee Pay — ${escapeHTML(t.employee.split(' ')[0])} ${typeLabel}`;
   }
   
+  const recurringBadge = (!isIncome && t.recurring)
+    ? '<span style="font-size:10px;background:#9b6e9b;color:#fff;padding:1px 5px;border-radius:4px;margin-left:5px;vertical-align:middle;">recurring</span>'
+    : '';
+
   return `
     <div class="transaction-item" onclick="openEditTransactionModal('${t.id}')">
       <div class="transaction-icon ${isIncome ? 'income' : 'expense'}">${isIncome ? '💰' : '💸'}</div>
       <div class="transaction-details">
-        <div class="transaction-category">${categoryDisplay}</div>
+        <div class="transaction-category">${categoryDisplay}${recurringBadge}</div>
         <div class="transaction-meta">${escapeHTML(t.clientName || '')}${t.clientName && t.notes ? ' · ' : ''}${escapeHTML(t.notes || '')}</div>
       </div>
       <div class="transaction-amount ${isIncome ? 'income' : 'expense'}">${isIncome ? '+' : '-'}${fmt(amount)}${tipText}</div>
@@ -1374,9 +1357,9 @@ function renderTransactionItem(t) {
 }
 
 function switchEntriesView(mode) {
-  state.entriesViewMode = mode;
+  state.entriesViewMode = mode === 'monthly' ? 'daily' : mode;
   document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
-  document.querySelector(`.view-tab:nth-child(${mode === 'daily' ? 1 : mode === 'monthly' ? 2 : 3})`).classList.add('active');
+  document.querySelector(`.view-tab:nth-child(${state.entriesViewMode === 'all' ? 2 : 1})`).classList.add('active');
   renderEntriesContent();
   renderEntryForm();
 }
@@ -1413,45 +1396,8 @@ function loadMoreTransactions() {
 function renderEntryForm() {
   const container = document.getElementById('entry-form-content');
   if (!container) return;
-  
-  const isMonthly = state.entriesViewMode === 'monthly';
-  
-  if (isMonthly) {
-    container.innerHTML = `
-      <div class="form-group">
-        <label class="form-label">Category</label>
-        <select class="form-select" id="entry-category">
-          <option value="">Select category...</option>
-          ${categoryOptions('EXPENSE')}
-        </select>
-      </div>
-      
-      <div class="form-group">
-        <label class="form-label">Amount ($)</label>
-        <input type="number" class="form-input" id="entry-amount" placeholder="0.00" step="0.01" min="0">
-      </div>
-      
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Month</label>
-          <select class="form-select" id="entry-month">
-            ${Array.from({length:12},(_,i) => `<option value="${i+1}" ${i+1===state.selectedMonth?'selected':''}>${monthName(i+1)}</option>`).join('')}
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Year</label>
-          <input type="number" class="form-input" id="entry-year" value="${state.selectedYear}" min="2020" max="2099">
-        </div>
-      </div>
-      
-      <div class="form-group">
-        <label class="form-label">Notes (optional)</label>
-        <input type="text" class="form-input" id="entry-notes" placeholder="e.g. rent increase, quarterly bill...">
-      </div>
-      
-      <button class="btn-primary" onclick="saveMonthlyExpense()">Add Monthly Expense</button>
-    `;
-  } else {
+
+  {
     container.innerHTML = `
       <div class="form-group">
         <label class="form-label">Type</label>
@@ -1533,14 +1479,39 @@ function renderEntryForm() {
         </select>
       </div>
       
+      <div class="form-group hidden" id="recurring-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:14px; font-weight:500;">
+          <input type="checkbox" id="entry-recurring" onchange="toggleRecurringFields()"
+            style="width:16px; height:16px; accent-color:var(--primary); flex-shrink:0;">
+          <span>Recurring monthly expense</span>
+        </label>
+        <div id="entry-usual-payday-section" style="display:none; margin-top:10px;">
+          <label class="form-label">Usually paid on day ___ of month (optional)</label>
+          <input type="number" class="form-input" id="entry-usual-payday"
+            placeholder="e.g. 1" min="1" max="31" style="max-width:120px;">
+        </div>
+      </div>
+
       <div class="form-group">
         <label class="form-label">Notes (optional)</label>
         <input type="text" class="form-input" id="entry-notes" placeholder="Any notes...">
       </div>
-      
+
       <button class="btn-primary" onclick="saveEntry()">Add Entry</button>
     `;
   }
+}
+
+function toggleRecurringFields() {
+  const isChecked = document.getElementById('entry-recurring')?.checked;
+  const section = document.getElementById('entry-usual-payday-section');
+  if (section) section.style.display = isChecked ? '' : 'none';
+}
+
+function toggleEditRecurringFields() {
+  const isChecked = document.getElementById('edit-recurring')?.checked;
+  const section = document.getElementById('edit-usual-payday-section');
+  if (section) section.style.display = isChecked ? '' : 'none';
 }
 
 let currentEntryType = 'INCOME';
@@ -1554,7 +1525,8 @@ function setEntryType(type) {
   document.getElementById('client-field').classList.toggle('hidden', type === 'EXPENSE');
   document.getElementById('income-amounts').classList.toggle('hidden', type === 'EXPENSE');
   document.getElementById('expense-amount').classList.toggle('hidden', type === 'INCOME');
-  
+  document.getElementById('recurring-group')?.classList.toggle('hidden', type === 'INCOME');
+
   // Hide employee pay fields when switching types
   document.getElementById('employee-pay-fields').classList.add('hidden');
   
@@ -1625,6 +1597,11 @@ async function saveEntry() {
     record.serviceAmount = 0;
     record.tipAmount = 0;
     
+    record.recurring   = document.getElementById('entry-recurring')?.checked || false;
+    record.usualPayDay = record.recurring
+      ? (parseInt(document.getElementById('entry-usual-payday')?.value) || null)
+      : null;
+
     // Add employee pay fields if applicable
     if (category === 'Employee Pay') {
       record.employee = document.getElementById('entry-employee')?.value || 'Chasity McGill';
@@ -1647,6 +1624,12 @@ async function saveEntry() {
       document.getElementById('vagaro-employee-field')?.classList.add('hidden');
     } else {
       document.getElementById('entry-amount').value = '';
+      // Reset recurring fields
+      const rec = document.getElementById('entry-recurring');
+      if (rec) rec.checked = false;
+      const rpd = document.getElementById('entry-usual-payday');
+      if (rpd) rpd.value = '';
+      document.getElementById('entry-usual-payday-section')?.style && (document.getElementById('entry-usual-payday-section').style.display = 'none');
       // Reset and hide employee pay fields
       document.getElementById('employee-pay-fields')?.classList.add('hidden');
     }
@@ -1745,14 +1728,14 @@ async function openEditTransactionModal(id) {
         <label class="form-label">Amount ($)</label>
         <input type="number" class="form-input" id="edit-amount" value="${t.amount || 0}" step="0.01">
       </div>
-      
+
       <!-- Employee Pay Fields -->
       <div class="form-group" id="edit-employee-pay-fields" ${t.category === 'Employee Pay' ? '' : 'style="display:none;"'}>
         <div class="form-row">
           <div class="form-group" style="flex:1;">
             <label class="form-label">Employee</label>
             <select class="form-select" id="edit-employee">
-              ${(state.employees || ['Chasity McGill']).map(e => 
+              ${(state.employees || ['Chasity McGill']).map(e =>
                 `<option value="${escapeHTML(e)}" ${e === (t.employee || 'Chasity McGill') ? 'selected' : ''}>${escapeHTML(e)}</option>`
               ).join('')}
             </select>
@@ -1764,6 +1747,21 @@ async function openEditTransactionModal(id) {
               <option value="taxes" ${t.payType === 'taxes' ? 'selected' : ''}>📋 Taxes</option>
             </select>
           </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:14px; font-weight:500;">
+          <input type="checkbox" id="edit-recurring" onchange="toggleEditRecurringFields()"
+            style="width:16px; height:16px; accent-color:var(--primary); flex-shrink:0;"
+            ${t.recurring ? 'checked' : ''}>
+          <span>Recurring monthly expense</span>
+        </label>
+        <div id="edit-usual-payday-section" style="display:${t.recurring ? '' : 'none'}; margin-top:10px;">
+          <label class="form-label">Usually paid on day ___ of month (optional)</label>
+          <input type="number" class="form-input" id="edit-usual-payday"
+            placeholder="e.g. 1" min="1" max="31" style="max-width:120px;"
+            value="${t.usualPayDay || ''}">
         </div>
       </div>
     `}
@@ -1816,8 +1814,12 @@ async function updateTransaction(id, isIncome) {
       changes.employee = null;
     }
   } else {
-    changes.amount = parseFloat(document.getElementById('edit-amount').value) || 0;
-    
+    changes.amount     = parseFloat(document.getElementById('edit-amount').value) || 0;
+    changes.recurring  = document.getElementById('edit-recurring')?.checked || false;
+    changes.usualPayDay = changes.recurring
+      ? (parseInt(document.getElementById('edit-usual-payday')?.value) || null)
+      : null;
+
     // Add employee pay fields if applicable
     if (category === 'Employee Pay') {
       changes.employee = document.getElementById('edit-employee')?.value || 'Chasity McGill';
@@ -3014,24 +3016,21 @@ async function renderMonthlyReport(output, controls) {
     <button class="btn-icon" onclick="state.selectedMonth++;if(state.selectedMonth>12){state.selectedMonth=1;state.selectedYear++;}renderReport('monthly')">›</button>
   `;
   
-  const [allTxns, allMExp] = await Promise.all([
-    db.transactions.toArray(),
-    db.monthlyExpenses.toArray()
-  ]);
-  
+  const allTxns = await db.transactions.toArray();
+
   const txns = allTxns.filter(t => t.date && t.date.startsWith(monthStr));
-  const mExp = allMExp.filter(e => e.year === y && e.month === m);
-  
-  const income = txns.filter(t => t.type === 'INCOME');
-  const dailyExp = txns.filter(t => t.type === 'EXPENSE');
-  
-  const totalServices = income.reduce((s, t) => s + (t.serviceAmount || 0), 0);
-  const totalTips = income.reduce((s, t) => s + (t.tipAmount || 0), 0);
-  const totalIncome = totalServices + totalTips;
-  const totalDailyExp = dailyExp.reduce((s, t) => s + (t.amount || 0), 0);
-  const totalMonthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
-  const totalExpenses = totalDailyExp + totalMonthlyExp;
-  const net = totalIncome - totalExpenses;
+
+  const income      = txns.filter(t => t.type === 'INCOME');
+  const dailyExp    = txns.filter(t => t.type === 'EXPENSE' && !t.recurring);
+  const recurringExp = txns.filter(t => t.type === 'EXPENSE' && t.recurring);
+
+  const totalServices   = income.reduce((s, t) => s + (t.serviceAmount || 0), 0);
+  const totalTips       = income.reduce((s, t) => s + (t.tipAmount || 0), 0);
+  const totalIncome     = totalServices + totalTips;
+  const totalDailyExp   = dailyExp.reduce((s, t) => s + (t.amount || 0), 0);
+  const totalMonthlyExp = recurringExp.reduce((s, t) => s + (t.amount || 0), 0);
+  const totalExpenses   = totalDailyExp + totalMonthlyExp;
+  const net             = totalIncome - totalExpenses;
   
   output.innerHTML = `
     <div class="report-stat-grid">
@@ -3072,21 +3071,17 @@ async function renderAnnualReport(output, controls) {
     <button class="btn-icon" onclick="state.selectedYear++;renderReport('annual')">›</button>
   `;
   
-  const [allTxns, allMExp] = await Promise.all([
-    db.transactions.toArray(),
-    db.monthlyExpenses.toArray()
-  ]);
-  
+  const allTxns = await db.transactions.toArray();
+
   let rows = '';
   let yearIncome = 0, yearExp = 0;
-  
+
   for (let m = 1; m <= 12; m++) {
     const monthStr = `${y}-${String(m).padStart(2, '0')}`;
     const txns = allTxns.filter(t => t.date && t.date.startsWith(monthStr));
-    const mExp = allMExp.filter(e => e.year === y && e.month === m);
-    
+
     const inc = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const exp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0) + mExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const exp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
     const net = inc - exp;
     
     yearIncome += inc;
@@ -3143,37 +3138,24 @@ async function renderCategoryReport(output, controls) {
     </div>
   `;
   
-  const [allTxns, allMExp] = await Promise.all([
-    db.transactions.toArray(),
-    db.monthlyExpenses.toArray()
-  ]);
-  
+  const allTxns = await db.transactions.toArray();
+
   const from = state.catReportFrom;
   const to = state.catReportTo;
-  
+
   // Filter transactions by date range
   const txns = allTxns.filter(t => t.date >= from && t.date <= to);
-  
-  // Filter monthly expenses by date range
-  const monthlyExp = allMExp.filter(e => {
-    if (!e.month || !e.year) return false;
-    const monthDate = `${e.year}-${String(e.month).padStart(2,'0')}-01`;
-    return monthDate >= from && monthDate <= to;
-  });
-  
+
   // Income by category
   const incCats = {};
   txns.filter(t => t.type === 'INCOME').forEach(t => {
     incCats[t.category] = (incCats[t.category] || 0) + (t.serviceAmount || 0) + (t.tipAmount || 0);
   });
-  
+
   // Expense by category
   const expCats = {};
   txns.filter(t => t.type === 'EXPENSE').forEach(t => {
     expCats[t.category] = (expCats[t.category] || 0) + (t.amount || 0);
-  });
-  monthlyExp.forEach(e => {
-    expCats[e.category] = (expCats[e.category] || 0) + (e.amount || 0);
   });
   
   const incTotal = Object.values(incCats).reduce((a, b) => a + b, 0);
@@ -3279,9 +3261,8 @@ async function renderPnLReport(output, controls) {
     ` : `<select class="form-input" style="width:90px;" onchange="state.selectedYear=parseInt(this.value);renderReport('pnl')">${yearOpts}</select>`}
   `;
 
-  const [allTxns, allMExp, allRentPmts] = await Promise.all([
+  const [allTxns, allRentPmts] = await Promise.all([
     db.transactions.toArray(),
-    db.monthlyExpenses.toArray(),
     db.rentPayments.toArray()
   ]);
 
@@ -3292,10 +3273,7 @@ async function renderPnLReport(output, controls) {
   const periodTxns = allTxns.filter(t => t.date >= pStart && t.date <= pEnd);
   const ytdTxns   = allTxns.filter(t => t.date >= `${y}-01-01` && t.date <= ytdEnd);
 
-  const mExpInRange = (s, e) => allMExp.filter(ex => {
-    const d = `${ex.year}-${pad(ex.month)}-15`;
-    return d >= s && d <= e;
-  });
+  const mExpInRange = (s, e) => allTxns.filter(t => t.type === 'EXPENSE' && t.recurring && t.date >= s && t.date <= e);
   const periodMExp = mExpInRange(pStart, pEnd);
   const ytdMExp    = mExpInRange(`${y}-01-01`, ytdEnd);
 
@@ -3334,8 +3312,8 @@ async function renderPnLReport(output, controls) {
       b[cat][col] += (e.amount || 0);
     });
   };
-  addExp(periodTxns, periodMExp, 'p');
-  addExp(ytdTxns,   ytdMExp,    'ytd');
+  addExp(periodTxns, [], 'p');
+  addExp(ytdTxns,   [], 'ytd');
 
   const pDirect   = Object.values(directLines).reduce((s,r) => s+r.p, 0);
   const ytdDirect = Object.values(directLines).reduce((s,r) => s+r.ytd, 0);
@@ -3620,22 +3598,16 @@ async function renderMonthCompareReport(output, controls) {
     </div>
   `;
   
-  const [allTxns, allMExp] = await Promise.all([
-    db.transactions.toArray(),
-    db.monthlyExpenses.toArray()
-  ]);
-  
+  const allTxns = await db.transactions.toArray();
+
   function getMonthData(month, year) {
     const monthStr = `${year}-${String(month).padStart(2, '0')}`;
     const txns = allTxns.filter(t => t.date?.startsWith(monthStr));
-    const mExp = allMExp.filter(e => e.year === year && e.month === month);
-    
+
     const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
-    const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
-    const expenses = dailyExp + monthlyExp;
+    const expenses = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
     const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
-    
+
     return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
   }
   
@@ -3756,22 +3728,16 @@ async function renderYOYReport(output, controls) {
     </div>
   `;
   
-  const [allTxns, allMExp] = await Promise.all([
-    db.transactions.toArray(),
-    db.monthlyExpenses.toArray()
-  ]);
-  
+  const allTxns = await db.transactions.toArray();
+
   function getYearData(year) {
     const yearStr = String(year);
     const txns = allTxns.filter(t => t.date?.startsWith(yearStr));
-    const mExp = allMExp.filter(e => e.year === year);
-    
+
     const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
-    const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
-    const expenses = dailyExp + monthlyExp;
+    const expenses = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
     const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
-    
+
     return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
   }
   
@@ -5697,9 +5663,8 @@ async function sendAskQuery() {
 }
 
 async function buildBusinessSnapshot() {
-  const [txns, mExp, renters, rentPmts] = await Promise.all([
+  const [txns, renters, rentPmts] = await Promise.all([
     db.transactions.toArray(),
-    db.monthlyExpenses.toArray(),
     db.renters.toArray(),
     db.rentPayments.toArray()
   ]);
@@ -5716,14 +5681,14 @@ async function buildBusinessSnapshot() {
     let y = curYear;
     while (m <= 0) { m += 12; y--; }
     const monthStr = `${y}-${String(m).padStart(2, '0')}`;
-    const mTxns = txns.filter(t => t.date?.startsWith(monthStr));
-    const mMExp = mExp.filter(e => e.year === y && e.month === m);
-    
+    const mTxns   = txns.filter(t => t.date?.startsWith(monthStr));
     const mIncome = mTxns.filter(t => t.type === 'INCOME');
-    const services = mIncome.reduce((s, t) => s + (t.serviceAmount || 0), 0);
-    const tips = mIncome.reduce((s, t) => s + (t.tipAmount || 0), 0);
-    const dailyExp = mTxns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
-    const monthlyExp = mMExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const mExp    = mTxns.filter(t => t.type === 'EXPENSE');
+
+    const services   = mIncome.reduce((s, t) => s + (t.serviceAmount || 0), 0);
+    const tips       = mIncome.reduce((s, t) => s + (t.tipAmount || 0), 0);
+    const dailyExp   = mExp.filter(t => !t.recurring).reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mExp.filter(t => t.recurring).reduce((s, t) => s + (t.amount || 0), 0);
     const rentCollected = rentPmts.filter(p => p.datePaid?.startsWith(monthStr)).reduce((s, p) => s + (p.amount || 0), 0);
     const uniqueClients = new Set(mIncome.filter(t => t.clientName?.trim()).map(t => t.clientName.trim().toLowerCase())).size;
     
@@ -6043,6 +6008,67 @@ async function checkPin() {
 
 let _appBooted = false;
 
+async function migrateMonthlyExpensesToTransactions() {
+  const FLAG_KEY = 'mf_monthly_migrated_v1';
+  if (localStorage.getItem(FLAG_KEY)) return;
+
+  const all = await db.monthlyExpenses.toArray();
+  if (all.length === 0) {
+    localStorage.setItem(FLAG_KEY, '1');
+    return;
+  }
+
+  const records = all.map(e => {
+    const lastDay = new Date(e.year, e.month, 0).getDate();
+    const date = `${e.year}-${String(e.month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+    return {
+      date,
+      type: 'EXPENSE',
+      category:            e.category,
+      amount:              e.amount,
+      notes:               e.notes || '',
+      paymentMethod:       '',
+      serviceAmount:       0,
+      tipAmount:           0,
+      recurring:           true,
+      usualPayDay:         null,
+      migratedFromMonthly: true,
+    };
+  });
+
+  await db.transactions.bulkAdd(records);
+  localStorage.setItem(FLAG_KEY, '1');
+  console.log(`Migrated ${records.length} monthly expenses to transactions.`);
+}
+
+async function checkRecurringExpenseReminders() {
+  const today      = todayStr();
+  const todayDay   = parseInt(today.split('-')[2]);
+  const monthPrefix = today.slice(0, 7);
+
+  const all       = await db.transactions.toArray();
+  const recurring = all.filter(t => t.type === 'EXPENSE' && t.recurring && t.usualPayDay);
+  if (recurring.length === 0) return;
+
+  const categoryMap = {};
+  recurring.forEach(t => {
+    if (!categoryMap[t.category]) categoryMap[t.category] = t.usualPayDay;
+  });
+
+  const reminders = [];
+  for (const [category, payDay] of Object.entries(categoryMap)) {
+    if (todayDay < payDay) continue;
+    const paidThisMonth = all.some(t =>
+      t.type === 'EXPENSE' && t.category === category && t.date.startsWith(monthPrefix)
+    );
+    if (!paidThisMonth) reminders.push(category);
+  }
+
+  reminders.forEach((cat, i) => {
+    setTimeout(() => showToast(`Reminder: Did you add "${cat}" this month?`), i * 2500);
+  });
+}
+
 async function bootApp() {
   if (_appBooted) return;
   _appBooted = true;
@@ -6055,17 +6081,22 @@ async function bootApp() {
     document.getElementById('user-avatar').textContent = (user.displayName || user.email || 'U').charAt(0).toUpperCase();
   }
   
+  await migrateMonthlyExpensesToTransactions();
+
   // Load categories
   await loadCategories();
-  
+
   // Load employees
   await loadEmployees();
-  
+
   // Check renters tab visibility
   await updateRentersTabVisibility();
-  
+
   // Navigate to dashboard
   navigate('dashboard');
+
+  // Fire-and-forget reminder check
+  setTimeout(() => checkRecurringExpenseReminders(), 2000);
 }
 
 // ----------------------------------------------------------------
