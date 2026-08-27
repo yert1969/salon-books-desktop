@@ -176,8 +176,6 @@ const state = {
   showRentersTab: false,
   categories: { INCOME: [], EXPENSE: [] },
   transactionsToShow: 30,
-  entriesTypeFilter: 'all',
-  entriesCategoryFilter: '',
   dashboardMonth: new Date().getMonth() + 1,
   dashboardYear: new Date().getFullYear(),
   clientSort: 'total',
@@ -197,10 +195,6 @@ const state = {
   // Category report state
   catReportFrom: `${new Date().getFullYear()}-01-01`,
   catReportTo: todayStr(),
-  // P&L report state
-  pnlPeriod: 'monthly',
-  pnlRangeStart: `${new Date().getFullYear()}-01-01`,
-  pnlRangeEnd: todayStr(),
   // Booth rent report state
   boothRentYear: new Date().getFullYear(),
   // Direct cost categories (for P&L)
@@ -592,7 +586,7 @@ function wasRecentlyShown(key) {
   return Date.now() - data[key] < 24 * 60 * 60 * 1000;
 }
 
-async function generateSmartInsights(allTxns, allRenters, allRentPmts) {
+async function generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts) {
   const insights = [];
   const now = new Date();
   const today = todayStr();
@@ -602,10 +596,14 @@ async function generateSmartInsights(allTxns, allRenters, allRentPmts) {
   const lastMonth = `${now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear()}-${String(now.getMonth() === 0 ? 12 : now.getMonth()).padStart(2, '0')}`;
   const thisYear = String(now.getFullYear());
   const lastYear = String(now.getFullYear() - 1);
-
+  
   // Helper to calculate income for a period
   const incomeFor = (txns) => txns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
-  const expenseFor = (txns) => txns.filter(t => t.type === 'EXPENSE').reduce((s,t) => s + (t.amount||0), 0);
+  const expenseFor = (txns, mExp) => {
+    const daily = txns.filter(t => t.type === 'EXPENSE').reduce((s,t) => s + (t.amount||0), 0);
+    const monthly = mExp.reduce((s,e) => s + (e.amount||0), 0);
+    return daily + monthly;
+  };
   
   // This month vs last month pace
   const thisMonthTxns = allTxns.filter(t => t.date?.startsWith(thisMonth));
@@ -853,33 +851,37 @@ async function renderDashboard() {
   const isCurrentMonth = viewYear === now.getFullYear() && viewMonth === now.getMonth() + 1;
   
   // Fetch all data
-  const [allTxns, allRenters, allRentPmts, allSums] = await Promise.all([
+  const [allTxns, allMExp, allRenters, allRentPmts, allSums] = await Promise.all([
     db.transactions.toArray(),
+    db.monthlyExpenses.toArray(),
     db.renters.toArray(),
     db.rentPayments.toArray(),
     db.dailySummary.toArray()
   ]);
-
+  
   // Month calculations
-  const mTxns    = allTxns.filter(t => t.date?.startsWith(monthStr));
-  const mIncome  = mTxns.filter(t => t.type === 'INCOME');
+  const mTxns = allTxns.filter(t => t.date?.startsWith(monthStr));
+  const mIncome = mTxns.filter(t => t.type === 'INCOME');
   const mExpenses = mTxns.filter(t => t.type === 'EXPENSE');
-
-  const mtdServices   = mIncome.reduce((s,t) => s + (t.serviceAmount||0), 0);
-  const mtdTips       = mIncome.reduce((s,t) => s + (t.tipAmount||0), 0);
-  const mtdIncome     = mtdServices + mtdTips;
-  const mtdDailyExp   = mExpenses.filter(t => !t.recurring).reduce((s,t) => s + (t.amount||0), 0);
-  const mtdMonthlyExp = mExpenses.filter(t => t.recurring).reduce((s,t) => s + (t.amount||0), 0);
-  const mtdExpenses   = mtdDailyExp + mtdMonthlyExp;
-  const mtdNet        = mtdIncome - mtdExpenses;
-  const mtdMargin     = mtdIncome > 0 ? Math.round((mtdNet / mtdIncome) * 100) : 0;
-
+  const mMonthlyExp = allMExp.filter(e => e.year === viewYear && e.month === viewMonth);
+  
+  const mtdServices = mIncome.reduce((s,t) => s + (t.serviceAmount||0), 0);
+  const mtdTips = mIncome.reduce((s,t) => s + (t.tipAmount||0), 0);
+  const mtdIncome = mtdServices + mtdTips;
+  const mtdDailyExp = mExpenses.reduce((s,t) => s + (t.amount||0), 0);
+  const mtdMonthlyExp = mMonthlyExp.reduce((s,e) => s + (e.amount||0), 0);
+  const mtdExpenses = mtdDailyExp + mtdMonthlyExp;
+  const mtdNet = mtdIncome - mtdExpenses;
+  const mtdMargin = mtdIncome > 0 ? Math.round((mtdNet / mtdIncome) * 100) : 0;
+  
   // YTD calculations
-  const yearStr      = String(viewYear);
-  const ytdIncome    = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'INCOME')
+  const yearStr = String(viewYear);
+  const ytdIncome = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'INCOME')
     .reduce((s,t) => s + (t.serviceAmount||0) + (t.tipAmount||0), 0);
-  const ytdExpenses  = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'EXPENSE')
+  const ytdDailyExp = allTxns.filter(t => t.date?.startsWith(yearStr) && t.type === 'EXPENSE')
     .reduce((s,t) => s + (t.amount||0), 0);
+  const ytdMonthlyExp = allMExp.filter(e => e.year === viewYear).reduce((s,e) => s + (e.amount||0), 0);
+  const ytdExpenses = ytdDailyExp + ytdMonthlyExp;
   
   // Week pace
   const today = todayStr();
@@ -922,7 +924,7 @@ async function renderDashboard() {
   // Generate smart insights (only on current month view)
   let insightsHTML = '';
   if (isCurrentMonth) {
-    const insights = await generateSmartInsights(allTxns, allRenters, allRentPmts);
+    const insights = await generateSmartInsights(allTxns, allMExp, allRenters, allRentPmts);
     if (insights.length > 0) {
       const insightItems = insights.map(i => {
         const bgColor = i.type === 'success' ? 'rgba(46, 125, 50, 0.08)' 
@@ -1071,7 +1073,8 @@ async function renderEntriesView() {
       <div class="entries-main">
         <!-- View Mode Tabs -->
         <div class="view-tabs">
-          <button class="view-tab ${state.entriesViewMode !== 'all' ? 'active' : ''}" onclick="switchEntriesView('daily')">Daily</button>
+          <button class="view-tab ${state.entriesViewMode === 'daily' ? 'active' : ''}" onclick="switchEntriesView('daily')">Daily</button>
+          <button class="view-tab ${state.entriesViewMode === 'monthly' ? 'active' : ''}" onclick="switchEntriesView('monthly')">Monthly</button>
           <button class="view-tab ${state.entriesViewMode === 'all' ? 'active' : ''}" onclick="switchEntriesView('all')">All Entries</button>
         </div>
         
@@ -1230,44 +1233,29 @@ async function renderMonthlyEntries(container) {
 
 async function renderAllEntries(container) {
   let allTransactions = await db.transactions.toArray();
-
+  const allMonthly = await db.monthlyExpenses.toArray();
+  
+  // Normalize monthly expenses
+  allMonthly.forEach(e => {
+    allTransactions.push({
+      ...e,
+      _isMonthly: true,
+      type: 'EXPENSE',
+      date: `${e.year}-${String(e.month).padStart(2,'0')}-01`,
+      amount: e.amount || 0,
+    });
+  });
+  
   // Sort by date descending
   allTransactions.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-
-  // Build category options from all transactions (deduplicated)
-  const allCategories = [...new Set(allTransactions.map(t => t.category).filter(Boolean))].sort();
-  const typeF = state.entriesTypeFilter;
-  const catF = state.entriesCategoryFilter;
-
-  // Apply filters
-  let filtered = allTransactions;
-  if (typeF === 'income') filtered = filtered.filter(t => t.type === 'INCOME');
-  else if (typeF === 'expense') filtered = filtered.filter(t => t.type === 'EXPENSE');
-  if (catF) filtered = filtered.filter(t => t.category === catF);
-
+  
   const toShow = state.transactionsToShow;
-  const display = filtered.slice(0, toShow);
-  const hasMore = filtered.length > toShow;
-
-  const catOptions = allCategories.map(c =>
-    `<option value="${escapeHTML(c)}" ${catF === c ? 'selected' : ''}>${escapeHTML(c)}</option>`
-  ).join('');
-
+  const display = allTransactions.slice(0, toShow);
+  const hasMore = allTransactions.length > toShow;
+  
   let html = `
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;">
-      <div style="display:flex;gap:4px;">
-        <button class="view-tab ${typeF === 'all' ? 'active' : ''}" onclick="setEntriesFilter('all','')">All</button>
-        <button class="view-tab ${typeF === 'income' ? 'active' : ''}" onclick="setEntriesFilter('income','')">Income</button>
-        <button class="view-tab ${typeF === 'expense' ? 'active' : ''}" onclick="setEntriesFilter('expense','')">Expenses</button>
-      </div>
-      <select onchange="setEntriesFilter('${typeF}', this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px;cursor:pointer;">
-        <option value="">All Categories</option>
-        ${catOptions}
-      </select>
-      ${(typeF !== 'all' || catF) ? `<button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="setEntriesFilter('all','')">Clear</button>` : ''}
-    </div>
     <div style="margin-bottom:16px;font-size:14px;color:var(--text-muted);">
-      Showing ${display.length} of ${filtered.length} entries${filtered.length !== allTransactions.length ? ` (filtered from ${allTransactions.length})` : ''}
+      Showing ${display.length} of ${allTransactions.length} entries
     </div>
     <div class="transaction-list">
   `;
@@ -1337,15 +1325,11 @@ function renderTransactionItem(t) {
     categoryDisplay = `Employee Pay — ${escapeHTML(t.employee.split(' ')[0])} ${typeLabel}`;
   }
   
-  const recurringBadge = (!isIncome && t.recurring)
-    ? '<span style="font-size:10px;background:#9b6e9b;color:#fff;padding:1px 5px;border-radius:4px;margin-left:5px;vertical-align:middle;">recurring</span>'
-    : '';
-
   return `
     <div class="transaction-item" onclick="openEditTransactionModal('${t.id}')">
       <div class="transaction-icon ${isIncome ? 'income' : 'expense'}">${isIncome ? '💰' : '💸'}</div>
       <div class="transaction-details">
-        <div class="transaction-category">${categoryDisplay}${recurringBadge}</div>
+        <div class="transaction-category">${categoryDisplay}</div>
         <div class="transaction-meta">${escapeHTML(t.clientName || '')}${t.clientName && t.notes ? ' · ' : ''}${escapeHTML(t.notes || '')}</div>
       </div>
       <div class="transaction-amount ${isIncome ? 'income' : 'expense'}">${isIncome ? '+' : '-'}${fmt(amount)}${tipText}</div>
@@ -1357,18 +1341,11 @@ function renderTransactionItem(t) {
 }
 
 function switchEntriesView(mode) {
-  state.entriesViewMode = mode === 'monthly' ? 'daily' : mode;
+  state.entriesViewMode = mode;
   document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
-  document.querySelector(`.view-tab:nth-child(${state.entriesViewMode === 'all' ? 2 : 1})`).classList.add('active');
+  document.querySelector(`.view-tab:nth-child(${mode === 'daily' ? 1 : mode === 'monthly' ? 2 : 3})`).classList.add('active');
   renderEntriesContent();
   renderEntryForm();
-}
-
-function setEntriesFilter(type, category) {
-  state.entriesTypeFilter = type;
-  state.entriesCategoryFilter = category;
-  state.transactionsToShow = 30;
-  renderEntriesContent();
 }
 
 function changeEntriesDate(days) {
@@ -1396,8 +1373,45 @@ function loadMoreTransactions() {
 function renderEntryForm() {
   const container = document.getElementById('entry-form-content');
   if (!container) return;
-
-  {
+  
+  const isMonthly = state.entriesViewMode === 'monthly';
+  
+  if (isMonthly) {
+    container.innerHTML = `
+      <div class="form-group">
+        <label class="form-label">Category</label>
+        <select class="form-select" id="entry-category">
+          <option value="">Select category...</option>
+          ${categoryOptions('EXPENSE')}
+        </select>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Amount ($)</label>
+        <input type="number" class="form-input" id="entry-amount" placeholder="0.00" step="0.01" min="0">
+      </div>
+      
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Month</label>
+          <select class="form-select" id="entry-month">
+            ${Array.from({length:12},(_,i) => `<option value="${i+1}" ${i+1===state.selectedMonth?'selected':''}>${monthName(i+1)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <input type="number" class="form-input" id="entry-year" value="${state.selectedYear}" min="2020" max="2099">
+        </div>
+      </div>
+      
+      <div class="form-group">
+        <label class="form-label">Notes (optional)</label>
+        <input type="text" class="form-input" id="entry-notes" placeholder="e.g. rent increase, quarterly bill...">
+      </div>
+      
+      <button class="btn-primary" onclick="saveMonthlyExpense()">Add Monthly Expense</button>
+    `;
+  } else {
     container.innerHTML = `
       <div class="form-group">
         <label class="form-label">Type</label>
@@ -1479,39 +1493,14 @@ function renderEntryForm() {
         </select>
       </div>
       
-      <div class="form-group hidden" id="recurring-group">
-        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:14px; font-weight:500;">
-          <input type="checkbox" id="entry-recurring" onchange="toggleRecurringFields()"
-            style="width:16px; height:16px; accent-color:var(--primary); flex-shrink:0;">
-          <span>Recurring monthly expense</span>
-        </label>
-        <div id="entry-usual-payday-section" style="display:none; margin-top:10px;">
-          <label class="form-label">Usually paid on day ___ of month (optional)</label>
-          <input type="number" class="form-input" id="entry-usual-payday"
-            placeholder="e.g. 1" min="1" max="31" style="max-width:120px;">
-        </div>
-      </div>
-
       <div class="form-group">
         <label class="form-label">Notes (optional)</label>
         <input type="text" class="form-input" id="entry-notes" placeholder="Any notes...">
       </div>
-
+      
       <button class="btn-primary" onclick="saveEntry()">Add Entry</button>
     `;
   }
-}
-
-function toggleRecurringFields() {
-  const isChecked = document.getElementById('entry-recurring')?.checked;
-  const section = document.getElementById('entry-usual-payday-section');
-  if (section) section.style.display = isChecked ? '' : 'none';
-}
-
-function toggleEditRecurringFields() {
-  const isChecked = document.getElementById('edit-recurring')?.checked;
-  const section = document.getElementById('edit-usual-payday-section');
-  if (section) section.style.display = isChecked ? '' : 'none';
 }
 
 let currentEntryType = 'INCOME';
@@ -1525,8 +1514,7 @@ function setEntryType(type) {
   document.getElementById('client-field').classList.toggle('hidden', type === 'EXPENSE');
   document.getElementById('income-amounts').classList.toggle('hidden', type === 'EXPENSE');
   document.getElementById('expense-amount').classList.toggle('hidden', type === 'INCOME');
-  document.getElementById('recurring-group')?.classList.toggle('hidden', type === 'INCOME');
-
+  
   // Hide employee pay fields when switching types
   document.getElementById('employee-pay-fields').classList.add('hidden');
   
@@ -1597,11 +1585,6 @@ async function saveEntry() {
     record.serviceAmount = 0;
     record.tipAmount = 0;
     
-    record.recurring   = document.getElementById('entry-recurring')?.checked || false;
-    record.usualPayDay = record.recurring
-      ? (parseInt(document.getElementById('entry-usual-payday')?.value) || null)
-      : null;
-
     // Add employee pay fields if applicable
     if (category === 'Employee Pay') {
       record.employee = document.getElementById('entry-employee')?.value || 'Chasity McGill';
@@ -1624,12 +1607,6 @@ async function saveEntry() {
       document.getElementById('vagaro-employee-field')?.classList.add('hidden');
     } else {
       document.getElementById('entry-amount').value = '';
-      // Reset recurring fields
-      const rec = document.getElementById('entry-recurring');
-      if (rec) rec.checked = false;
-      const rpd = document.getElementById('entry-usual-payday');
-      if (rpd) rpd.value = '';
-      document.getElementById('entry-usual-payday-section')?.style && (document.getElementById('entry-usual-payday-section').style.display = 'none');
       // Reset and hide employee pay fields
       document.getElementById('employee-pay-fields')?.classList.add('hidden');
     }
@@ -1728,14 +1705,14 @@ async function openEditTransactionModal(id) {
         <label class="form-label">Amount ($)</label>
         <input type="number" class="form-input" id="edit-amount" value="${t.amount || 0}" step="0.01">
       </div>
-
+      
       <!-- Employee Pay Fields -->
       <div class="form-group" id="edit-employee-pay-fields" ${t.category === 'Employee Pay' ? '' : 'style="display:none;"'}>
         <div class="form-row">
           <div class="form-group" style="flex:1;">
             <label class="form-label">Employee</label>
             <select class="form-select" id="edit-employee">
-              ${(state.employees || ['Chasity McGill']).map(e =>
+              ${(state.employees || ['Chasity McGill']).map(e => 
                 `<option value="${escapeHTML(e)}" ${e === (t.employee || 'Chasity McGill') ? 'selected' : ''}>${escapeHTML(e)}</option>`
               ).join('')}
             </select>
@@ -1747,21 +1724,6 @@ async function openEditTransactionModal(id) {
               <option value="taxes" ${t.payType === 'taxes' ? 'selected' : ''}>📋 Taxes</option>
             </select>
           </div>
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:14px; font-weight:500;">
-          <input type="checkbox" id="edit-recurring" onchange="toggleEditRecurringFields()"
-            style="width:16px; height:16px; accent-color:var(--primary); flex-shrink:0;"
-            ${t.recurring ? 'checked' : ''}>
-          <span>Recurring monthly expense</span>
-        </label>
-        <div id="edit-usual-payday-section" style="display:${t.recurring ? '' : 'none'}; margin-top:10px;">
-          <label class="form-label">Usually paid on day ___ of month (optional)</label>
-          <input type="number" class="form-input" id="edit-usual-payday"
-            placeholder="e.g. 1" min="1" max="31" style="max-width:120px;"
-            value="${t.usualPayDay || ''}">
         </div>
       </div>
     `}
@@ -1814,12 +1776,8 @@ async function updateTransaction(id, isIncome) {
       changes.employee = null;
     }
   } else {
-    changes.amount     = parseFloat(document.getElementById('edit-amount').value) || 0;
-    changes.recurring  = document.getElementById('edit-recurring')?.checked || false;
-    changes.usualPayDay = changes.recurring
-      ? (parseInt(document.getElementById('edit-usual-payday')?.value) || null)
-      : null;
-
+    changes.amount = parseFloat(document.getElementById('edit-amount').value) || 0;
+    
     // Add employee pay fields if applicable
     if (category === 'Employee Pay') {
       changes.employee = document.getElementById('edit-employee')?.value || 'Chasity McGill';
@@ -2392,143 +2350,50 @@ async function saveCatchUpPayments() {
   await renderRentersView();
 }
 
-async function openRenterDetail(renterId, histYear) {
+async function openRenterDetail(renterId) {
   const r = await db.renters.get(renterId);
   if (!r) return;
-
+  
   const payments = await db.rentPayments.where('renterId').equals(renterId).toArray();
-  const payByWeek = {};
-  payments.forEach(p => { payByWeek[p.weekStart] = p; });
-
+  payments.sort((a,b) => b.weekStart.localeCompare(a.weekStart));
+  
   ensureRateHistory(r);
   const curRate = getCurrentRate(r);
-
-  const today = new Date();
-  const curYear = today.getFullYear();
-  const startYear = r.startDate ? parseInt(r.startDate.substring(0, 4)) : curYear;
-  const selectedYear = histYear || curYear;
-
-  // Generate all weeks for selected year that fall within renter's tenure
-  const yearStart = new Date(`${selectedYear}-01-01T12:00:00`);
-  const yearEnd   = new Date(`${selectedYear}-12-31T23:59:59`);
-  const renterStart = new Date((r.startDate || `${selectedYear}-01-01`) + 'T12:00:00');
-  const rangeStart = renterStart > yearStart ? renterStart : yearStart;
-  const rangeEnd   = today < yearEnd ? today : yearEnd;
-
-  // Walk forward week by week (Monday-aligned)
-  const weeks = [];
-  let d = new Date(rangeStart);
-  const dow = d.getDay();
-  d.setDate(d.getDate() + (dow === 0 ? 1 : dow === 1 ? 0 : 8 - dow)); // snap to next/current Monday
-  while (d <= rangeEnd) {
-    weeks.push(d.toISOString().split('T')[0]);
-    d = new Date(d);
-    d.setDate(d.getDate() + 7);
-  }
-  weeks.reverse(); // newest first
-
-  // Stats
-  let totalExpected = 0, totalPaid = 0, onTimeCount = 0, lateCount = 0, missedCount = 0;
-  weeks.forEach(ws => {
-    const rate = getRateForWeek(r, ws);
-    const p = payByWeek[ws];
-    totalExpected += rate;
-    if (p) {
-      totalPaid += p.amount;
-      getRentStatus(ws, p.datePaid) === 'ontime' ? onTimeCount++ : lateCount++;
-    } else {
-      missedCount++;
-    }
-  });
-  const outstanding = Math.max(0, totalExpected - totalPaid);
-  const paidWeeks   = onTimeCount + lateCount;
-  const onTimeRate  = paidWeeks > 0 ? Math.round((onTimeCount / paidWeeks) * 100) : 0;
-
-  // Year filter tabs
-  const yearTabs = [];
-  for (let y = curYear; y >= startYear; y--) {
-    const active = y === selectedYear;
-    yearTabs.push(`<button onclick="openRenterDetail('${renterId}',${y})" style="padding:5px 14px;border-radius:20px;border:1px solid ${active ? 'var(--plum)' : 'var(--border-light)'};cursor:pointer;font-size:13px;font-weight:600;background:${active ? 'var(--plum)' : 'transparent'};color:${active ? '#fff' : 'var(--text-muted)'};">${y}</button>`);
-  }
-
-  // Week rows
-  const rows = weeks.map(ws => {
-    const rate = getRateForWeek(r, ws);
-    const p    = payByWeek[ws];
-    if (p) {
-      const status  = getRentStatus(ws, p.datePaid);
-      const isShort = p.amount < rate * 0.99;
-      const icon    = status === 'ontime' ? '✅' : '⚠️';
-      const sColor  = status === 'ontime' ? 'var(--success)' : '#e07b39';
-      const aColor  = isShort ? '#e07b39' : 'var(--success)';
-      const shortNote = isShort ? `<span style="font-size:10px;color:#e07b39;margin-left:4px;">(short ${fmt(rate - p.amount)})</span>` : '';
-      const noteStr = p.notes ? ` · ${p.notes}` : '';
-      return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-light);">
-        <div style="font-size:17px;width:22px;text-align:center;">${icon}</div>
-        <div style="flex:1;min-width:0;">
-          <div style="font-weight:500;font-size:14px;">${formatWeekRange(ws)}</div>
-          <div style="font-size:12px;color:var(--text-muted);">Paid ${formatDateShort(p.datePaid)} · ${p.paymentMethod}${noteStr}</div>
-        </div>
-        <div style="text-align:right;white-space:nowrap;">
-          <div style="font-weight:600;color:${aColor};">${fmt(p.amount)}${shortNote}</div>
-          <div style="font-size:11px;color:${sColor};">${status === 'ontime' ? 'On Time' : 'Late'}</div>
-        </div>
-      </div>`;
-    } else {
-      return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-light);">
-        <div style="font-size:17px;width:22px;text-align:center;">❌</div>
-        <div style="flex:1;min-width:0;">
-          <div style="font-weight:500;font-size:14px;">${formatWeekRange(ws)}</div>
-          <div style="font-size:12px;color:var(--text-muted);">No payment recorded</div>
-        </div>
-        <div style="text-align:right;white-space:nowrap;">
-          <div style="font-weight:600;color:var(--danger);">−${fmt(rate)}</div>
-          <div style="font-size:11px;color:var(--danger);">Missing</div>
-        </div>
-      </div>`;
-    }
-  }).join('');
-
+  
+  const historyHTML = payments.length === 0 
+    ? '<p style="color:var(--text-muted);text-align:center;padding:20px;">No payment history yet</p>'
+    : payments.slice(0, 10).map(p => {
+        const status = getRentStatus(p.weekStart, p.datePaid);
+        return `
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border-light);">
+            <div style="font-size:20px;">${status === 'ontime' ? '✅' : '⚠️'}</div>
+            <div style="flex:1;">
+              <div style="font-weight:500;">${formatWeekRange(p.weekStart)}</div>
+              <div style="font-size:12px;color:var(--text-muted);">Paid ${formatDateShort(p.datePaid)} · ${p.paymentMethod}</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-weight:600;color:var(--success);">${fmt(p.amount)}</div>
+              <div style="font-size:11px;color:${status === 'ontime' ? 'var(--success)' : 'var(--danger)'};">${status === 'ontime' ? 'On Time' : 'Late'}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+  
   openModal(`
     <h2 class="modal-title">${r.name}</h2>
-    <div style="display:flex;gap:16px;margin-bottom:16px;color:var(--text-muted);font-size:14px;flex-wrap:wrap;">
+    <div style="display:flex;gap:16px;margin-bottom:20px;color:var(--text-muted);font-size:14px;">
       ${r.booth ? `<span>Booth ${r.booth}</span>` : ''}
       <span>${fmt(curRate)}/week</span>
       <span>Since ${r.startDate ? formatDateShort(r.startDate) : 'N/A'}</span>
     </div>
-
-    <div style="display:flex;gap:8px;margin-bottom:20px;">
+    
+    <div style="display:flex;gap:12px;margin-bottom:24px;">
       <button class="btn-secondary" style="flex:1;" onclick="openLogPaymentModal('${r.id}');closeModal()">+ Log Payment</button>
       <button class="btn-secondary" style="flex:1;" onclick="openEditRenterModal('${r.id}')">Edit Profile</button>
     </div>
-
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">${yearTabs.join('')}</div>
-
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:20px;">
-      <div style="background:var(--cream);border-radius:10px;padding:10px;text-align:center;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Expected</div>
-        <div style="font-size:15px;font-weight:700;">${fmt(totalExpected)}</div>
-      </div>
-      <div style="background:var(--cream);border-radius:10px;padding:10px;text-align:center;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Collected</div>
-        <div style="font-size:15px;font-weight:700;color:var(--success);">${fmt(totalPaid)}</div>
-      </div>
-      <div style="background:var(--cream);border-radius:10px;padding:10px;text-align:center;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Outstanding</div>
-        <div style="font-size:15px;font-weight:700;color:${outstanding > 0 ? 'var(--danger)' : 'var(--success)'};">${outstanding > 0 ? fmt(outstanding) : '✓ All Paid'}</div>
-      </div>
-      <div style="background:var(--cream);border-radius:10px;padding:10px;text-align:center;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">On-Time Rate</div>
-        <div style="font-size:15px;font-weight:700;">${onTimeRate}%</div>
-      </div>
-    </div>
-
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:10px;">
-      ${selectedYear} · ${weeks.length} weeks · ${missedCount} missing
-    </div>
-    <div style="max-height:380px;overflow-y:auto;padding-right:4px;">
-      ${rows || '<p style="color:var(--text-muted);text-align:center;padding:20px;">No weeks in this period</p>'}
-    </div>
+    
+    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:12px;">Payment History</div>
+    ${historyHTML}
   `);
 }
 
@@ -3016,21 +2881,24 @@ async function renderMonthlyReport(output, controls) {
     <button class="btn-icon" onclick="state.selectedMonth++;if(state.selectedMonth>12){state.selectedMonth=1;state.selectedYear++;}renderReport('monthly')">›</button>
   `;
   
-  const allTxns = await db.transactions.toArray();
-
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
   const txns = allTxns.filter(t => t.date && t.date.startsWith(monthStr));
-
-  const income      = txns.filter(t => t.type === 'INCOME');
-  const dailyExp    = txns.filter(t => t.type === 'EXPENSE' && !t.recurring);
-  const recurringExp = txns.filter(t => t.type === 'EXPENSE' && t.recurring);
-
-  const totalServices   = income.reduce((s, t) => s + (t.serviceAmount || 0), 0);
-  const totalTips       = income.reduce((s, t) => s + (t.tipAmount || 0), 0);
-  const totalIncome     = totalServices + totalTips;
-  const totalDailyExp   = dailyExp.reduce((s, t) => s + (t.amount || 0), 0);
-  const totalMonthlyExp = recurringExp.reduce((s, t) => s + (t.amount || 0), 0);
-  const totalExpenses   = totalDailyExp + totalMonthlyExp;
-  const net             = totalIncome - totalExpenses;
+  const mExp = allMExp.filter(e => e.year === y && e.month === m);
+  
+  const income = txns.filter(t => t.type === 'INCOME');
+  const dailyExp = txns.filter(t => t.type === 'EXPENSE');
+  
+  const totalServices = income.reduce((s, t) => s + (t.serviceAmount || 0), 0);
+  const totalTips = income.reduce((s, t) => s + (t.tipAmount || 0), 0);
+  const totalIncome = totalServices + totalTips;
+  const totalDailyExp = dailyExp.reduce((s, t) => s + (t.amount || 0), 0);
+  const totalMonthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
+  const totalExpenses = totalDailyExp + totalMonthlyExp;
+  const net = totalIncome - totalExpenses;
   
   output.innerHTML = `
     <div class="report-stat-grid">
@@ -3071,17 +2939,21 @@ async function renderAnnualReport(output, controls) {
     <button class="btn-icon" onclick="state.selectedYear++;renderReport('annual')">›</button>
   `;
   
-  const allTxns = await db.transactions.toArray();
-
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
   let rows = '';
   let yearIncome = 0, yearExp = 0;
-
+  
   for (let m = 1; m <= 12; m++) {
     const monthStr = `${y}-${String(m).padStart(2, '0')}`;
     const txns = allTxns.filter(t => t.date && t.date.startsWith(monthStr));
-
+    const mExp = allMExp.filter(e => e.year === y && e.month === m);
+    
     const inc = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const exp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const exp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0) + mExp.reduce((s, e) => s + (e.amount || 0), 0);
     const net = inc - exp;
     
     yearIncome += inc;
@@ -3138,24 +3010,37 @@ async function renderCategoryReport(output, controls) {
     </div>
   `;
   
-  const allTxns = await db.transactions.toArray();
-
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
   const from = state.catReportFrom;
   const to = state.catReportTo;
-
+  
   // Filter transactions by date range
   const txns = allTxns.filter(t => t.date >= from && t.date <= to);
-
+  
+  // Filter monthly expenses by date range
+  const monthlyExp = allMExp.filter(e => {
+    if (!e.month || !e.year) return false;
+    const monthDate = `${e.year}-${String(e.month).padStart(2,'0')}-01`;
+    return monthDate >= from && monthDate <= to;
+  });
+  
   // Income by category
   const incCats = {};
   txns.filter(t => t.type === 'INCOME').forEach(t => {
     incCats[t.category] = (incCats[t.category] || 0) + (t.serviceAmount || 0) + (t.tipAmount || 0);
   });
-
+  
   // Expense by category
   const expCats = {};
   txns.filter(t => t.type === 'EXPENSE').forEach(t => {
     expCats[t.category] = (expCats[t.category] || 0) + (t.amount || 0);
+  });
+  monthlyExp.forEach(e => {
+    expCats[e.category] = (expCats[e.category] || 0) + (e.amount || 0);
   });
   
   const incTotal = Object.values(incCats).reduce((a, b) => a + b, 0);
@@ -3215,203 +3100,187 @@ async function renderCategoryReport(output, controls) {
 }
 
 async function renderPnLReport(output, controls) {
-  const y = state.selectedYear;
   const m = state.selectedMonth;
-  const period = state.pnlPeriod || 'monthly';
-  const pad = n => String(n).padStart(2, '0');
-
-  // Compute period date range
-  let pStart, pEnd, pLabel;
-  switch (period) {
-    case 'q1': pStart = `${y}-01-01`; pEnd = `${y}-03-31`; pLabel = `Q1 ${y}`; break;
-    case 'q2': pStart = `${y}-04-01`; pEnd = `${y}-06-30`; pLabel = `Q2 ${y}`; break;
-    case 'q3': pStart = `${y}-07-01`; pEnd = `${y}-09-30`; pLabel = `Q3 ${y}`; break;
-    case 'q4': pStart = `${y}-10-01`; pEnd = `${y}-12-31`; pLabel = `Q4 ${y}`; break;
-    case 'ytd': pStart = `${y}-01-01`; pEnd = todayStr(); pLabel = `YTD ${y}`; break;
-    case 'range': pStart = state.pnlRangeStart; pEnd = state.pnlRangeEnd; pLabel = `${pStart} — ${pEnd}`; break;
-    default: { // monthly
-      const ms = `${y}-${pad(m)}`;
-      pStart = `${ms}-01`; pEnd = `${ms}-31`; pLabel = `${monthName(m)} ${y}`;
-    }
-  }
-  const showYtd = period !== 'ytd';
-  const ytdEnd = todayStr();
-  const cols = showYtd ? 5 : 3;
-
-  // Controls
-  const periodOpts = [
-    ['monthly','Monthly'], ['q1','Q1 (Jan–Mar)'], ['q2','Q2 (Apr–Jun)'],
-    ['q3','Q3 (Jul–Sep)'], ['q4','Q4 (Oct–Dec)'], ['ytd','Year to Date'], ['range','Date Range']
-  ].map(([v,l]) => `<option value="${v}" ${period===v?'selected':''}>${l}</option>`).join('');
-
-  const yearOpts = [2024,2025,2026,2027].map(yr =>
-    `<option value="${yr}" ${yr===y?'selected':''}>${yr}</option>`).join('');
-
+  const y = state.selectedYear;
+  const monthStr = `${y}-${String(m).padStart(2, '0')}`;
+  const yearStr = String(y);
+  
   controls.innerHTML = `
-    <select class="form-input" style="width:160px;" onchange="state.pnlPeriod=this.value;renderReport('pnl')">${periodOpts}</select>
-    ${period === 'monthly' ? `
-      <button class="btn-icon" onclick="state.selectedMonth--;if(state.selectedMonth<1){state.selectedMonth=12;state.selectedYear--;}renderReport('pnl')">‹</button>
-      <span style="font-weight:600;min-width:100px;text-align:center;">${monthName(m)}</span>
-      <button class="btn-icon" onclick="state.selectedMonth++;if(state.selectedMonth>12){state.selectedMonth=1;state.selectedYear++;}renderReport('pnl')">›</button>
-    ` : ''}
-    ${period === 'range' ? `
-      <input type="date" class="form-input" style="width:140px;" value="${state.pnlRangeStart}" onchange="state.pnlRangeStart=this.value;renderReport('pnl')">
-      <span style="color:var(--text-muted);">to</span>
-      <input type="date" class="form-input" style="width:140px;" value="${state.pnlRangeEnd}" onchange="state.pnlRangeEnd=this.value;renderReport('pnl')">
-    ` : `<select class="form-input" style="width:90px;" onchange="state.selectedYear=parseInt(this.value);renderReport('pnl')">${yearOpts}</select>`}
+    <button class="btn-icon" onclick="state.selectedMonth--;if(state.selectedMonth<1){state.selectedMonth=12;state.selectedYear--;}renderReport('pnl')">‹</button>
+    <span style="font-weight:600;min-width:180px;text-align:center;">${monthName(m)} ${y}</span>
+    <button class="btn-icon" onclick="state.selectedMonth++;if(state.selectedMonth>12){state.selectedMonth=1;state.selectedYear++;}renderReport('pnl')">›</button>
   `;
-
-  const [allTxns, allRentPmts] = await Promise.all([
+  
+  const [allTxns, allMExp, allRenters, allRentPmts] = await Promise.all([
     db.transactions.toArray(),
+    db.monthlyExpenses.toArray(),
+    db.renters.toArray(),
     db.rentPayments.toArray()
   ]);
-
+  
+  // Load direct cost categories from settings
   const directCatsDoc = await db.settings.get('directCostCategories');
   const directCats = directCatsDoc?.value ? JSON.parse(directCatsDoc.value) : [];
   const isDirect = (cat) => directCats.includes(cat);
-
-  const periodTxns = allTxns.filter(t => t.date >= pStart && t.date <= pEnd);
-  const ytdTxns   = allTxns.filter(t => t.date >= `${y}-01-01` && t.date <= ytdEnd);
-
-  const mExpInRange = (s, e) => allTxns.filter(t => t.type === 'EXPENSE' && t.recurring && t.date >= s && t.date <= e);
-  const periodMExp = mExpInRange(pStart, pEnd);
-  const ytdMExp    = mExpInRange(`${y}-01-01`, ytdEnd);
-
-  // Revenue
+  
+  const monthTxns = allTxns.filter(t => t.date?.startsWith(monthStr));
+  const ytdTxns = allTxns.filter(t => t.date?.startsWith(yearStr));
+  
+  // Revenue by category
   const revenueLines = {};
-  const addRev = (txns, col) => txns.filter(t => t.type === 'INCOME').forEach(t => {
+  monthTxns.filter(t => t.type === 'INCOME').forEach(t => {
     const key = t.category || 'Other';
-    if (!revenueLines[key]) revenueLines[key] = { p: 0, ytd: 0 };
-    revenueLines[key][col] += (t.serviceAmount || 0);
+    if (!revenueLines[key]) revenueLines[key] = { month: 0, ytd: 0 };
+    revenueLines[key].month += (t.serviceAmount || 0);
   });
-  addRev(periodTxns, 'p'); addRev(ytdTxns, 'ytd');
-
-  const pTips   = periodTxns.filter(t => t.type==='INCOME').reduce((s,t) => s+(t.tipAmount||0), 0);
-  const ytdTips = ytdTxns.filter(t => t.type==='INCOME').reduce((s,t) => s+(t.tipAmount||0), 0);
-  const pRent   = allRentPmts.filter(p => p.datePaid >= pStart && p.datePaid <= pEnd).reduce((s,p) => s+(p.amount||0), 0);
-  const ytdRent = allRentPmts.filter(p => p.datePaid >= `${y}-01-01` && p.datePaid <= ytdEnd).reduce((s,p) => s+(p.amount||0), 0);
-
-  const pServiceTotal   = Object.values(revenueLines).reduce((s,r) => s+r.p, 0);
-  const ytdServiceTotal = Object.values(revenueLines).reduce((s,r) => s+r.ytd, 0);
-  const pGross   = pServiceTotal + pTips + pRent;
-  const ytdGross = ytdServiceTotal + ytdTips + ytdRent;
-
+  ytdTxns.filter(t => t.type === 'INCOME').forEach(t => {
+    const key = t.category || 'Other';
+    if (!revenueLines[key]) revenueLines[key] = { month: 0, ytd: 0 };
+    revenueLines[key].ytd += (t.serviceAmount || 0);
+  });
+  
+  // Tips
+  const monthTips = monthTxns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.tipAmount || 0), 0);
+  const ytdTips = ytdTxns.filter(t => t.type === 'INCOME').reduce((s,t) => s + (t.tipAmount || 0), 0);
+  
+  // Booth rent
+  const monthRent = allRentPmts.filter(p => p.datePaid?.startsWith(monthStr)).reduce((s,p) => s + (p.amount || 0), 0);
+  const ytdRent = allRentPmts.filter(p => p.datePaid?.startsWith(yearStr)).reduce((s,p) => s + (p.amount || 0), 0);
+  
+  const monthServiceTotal = Object.values(revenueLines).reduce((s,r) => s + r.month, 0);
+  const ytdServiceTotal = Object.values(revenueLines).reduce((s,r) => s + r.ytd, 0);
+  const monthGrossRevenue = monthServiceTotal + monthTips + monthRent;
+  const ytdGrossRevenue = ytdServiceTotal + ytdTips + ytdRent;
+  
   // Expenses
-  const directLines = {}, overheadLines = {};
-  const addExp = (txns, mexp, col) => {
-    txns.filter(t => t.type === 'EXPENSE').forEach(t => {
-      const cat = t.category || 'Other';
-      const b = isDirect(cat) ? directLines : overheadLines;
-      if (!b[cat]) b[cat] = { p: 0, ytd: 0 };
-      b[cat][col] += (t.amount || 0);
-    });
-    mexp.forEach(e => {
-      const cat = e.category || 'Other';
-      const b = isDirect(cat) ? directLines : overheadLines;
-      if (!b[cat]) b[cat] = { p: 0, ytd: 0 };
-      b[cat][col] += (e.amount || 0);
-    });
-  };
-  addExp(periodTxns, [], 'p');
-  addExp(ytdTxns,   [], 'ytd');
-
-  const pDirect   = Object.values(directLines).reduce((s,r) => s+r.p, 0);
-  const ytdDirect = Object.values(directLines).reduce((s,r) => s+r.ytd, 0);
-  const pOverhead   = Object.values(overheadLines).reduce((s,r) => s+r.p, 0);
-  const ytdOverhead = Object.values(overheadLines).reduce((s,r) => s+r.ytd, 0);
-  const pTotalExp   = pDirect + pOverhead;
-  const ytdTotalExp = ytdDirect + ytdOverhead;
-
-  const pGrossProfit   = pGross - pDirect;
-  const ytdGrossProfit = ytdGross - ytdDirect;
-  const pNet   = pGross - pTotalExp;
-  const ytdNet = ytdGross - ytdTotalExp;
-
-  const pctOf = (val, total) => total > 0 ? `${((val/total)*100).toFixed(1)}%` : '—';
-  const ytdCell = (val, base) => showYtd ? `<td style="text-align:right;padding:8px;">${fmt(val)}</td><td style="text-align:right;padding:8px;color:var(--text-muted);font-size:13px;">${pctOf(val,base)}</td>` : '';
-  const ytdSubCell = (val, base) => showYtd ? `<td style="text-align:right;padding:12px;">${fmt(val)}</td><td style="text-align:right;padding:12px;font-size:13px;">${pctOf(val,base)}</td>` : '';
-
-  const row = (label, pVal, yVal, indent=true) => `
-    <tr>
-      <td style="padding:8px 0;${indent?'padding-left:16px;':'font-weight:600;'}">${label}</td>
-      <td style="text-align:right;padding:8px;">${fmt(pVal)}</td>
-      <td style="text-align:right;padding:8px;color:var(--text-muted);font-size:13px;">${pctOf(pVal,pGross)}</td>
-      ${ytdCell(yVal, ytdGross)}
+  const directLines = {};
+  const overheadLines = {};
+  
+  monthTxns.filter(t => t.type === 'EXPENSE').forEach(t => {
+    const cat = t.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].month += (t.amount || 0);
+  });
+  ytdTxns.filter(t => t.type === 'EXPENSE').forEach(t => {
+    const cat = t.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].ytd += (t.amount || 0);
+  });
+  
+  allMExp.filter(e => e.year === y && e.month === m).forEach(e => {
+    const cat = e.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].month += (e.amount || 0);
+  });
+  allMExp.filter(e => e.year === y && e.month <= m).forEach(e => {
+    const cat = e.category || 'Other';
+    const bucket = isDirect(cat) ? directLines : overheadLines;
+    if (!bucket[cat]) bucket[cat] = { month: 0, ytd: 0 };
+    bucket[cat].ytd += (e.amount || 0);
+  });
+  
+  const monthDirectTotal = Object.values(directLines).reduce((s,r) => s + r.month, 0);
+  const ytdDirectTotal = Object.values(directLines).reduce((s,r) => s + r.ytd, 0);
+  const monthOverheadTotal = Object.values(overheadLines).reduce((s,r) => s + r.month, 0);
+  const ytdOverheadTotal = Object.values(overheadLines).reduce((s,r) => s + r.ytd, 0);
+  const monthTotalExpenses = monthDirectTotal + monthOverheadTotal;
+  const ytdTotalExpenses = ytdDirectTotal + ytdOverheadTotal;
+  
+  const monthGrossProfit = monthGrossRevenue - monthDirectTotal;
+  const ytdGrossProfit = ytdGrossRevenue - ytdDirectTotal;
+  const monthNetIncome = monthGrossRevenue - monthTotalExpenses;
+  const ytdNetIncome = ytdGrossRevenue - ytdTotalExpenses;
+  
+  const pctOf = (val, total) => total > 0 ? `${((val / total) * 100).toFixed(1)}%` : '—';
+  
+  const row = (label, mVal, yVal, indent = true, color = null) => `
+    <tr style="${color ? 'color:' + color + ';' : ''}">
+      <td style="padding:8px 0;${indent ? 'padding-left:16px;' : 'font-weight:600;'}">${label}</td>
+      <td style="text-align:right;padding:8px;">${fmt(mVal)}</td>
+      <td style="text-align:right;padding:8px;color:var(--text-muted);font-size:13px;">${pctOf(mVal, monthGrossRevenue)}</td>
+      <td style="text-align:right;padding:8px;">${fmt(yVal)}</td>
+      <td style="text-align:right;padding:8px;color:var(--text-muted);font-size:13px;">${pctOf(yVal, ytdGrossRevenue)}</td>
     </tr>`;
-
-  const subtotalRow = (label, pVal, yVal, color) => `
-    <tr style="font-weight:700;border-top:2px solid var(--border);${color?'color:'+color+';':''}">
+  
+  const subtotalRow = (label, mVal, yVal, color) => `
+    <tr style="font-weight:700;border-top:2px solid var(--border);${color ? 'color:' + color + ';' : ''}">
       <td style="padding:12px 0;">${label}</td>
-      <td style="text-align:right;padding:12px;">${fmt(pVal)}</td>
-      <td style="text-align:right;padding:12px;font-size:13px;">${pctOf(pVal,pGross)}</td>
-      ${ytdSubCell(yVal, ytdGross)}
+      <td style="text-align:right;padding:12px;">${fmt(mVal)}</td>
+      <td style="text-align:right;padding:12px;font-size:13px;">${pctOf(mVal, monthGrossRevenue)}</td>
+      <td style="text-align:right;padding:12px;">${fmt(yVal)}</td>
+      <td style="text-align:right;padding:12px;font-size:13px;">${pctOf(yVal, ytdGrossRevenue)}</td>
     </tr>`;
-
-  const sortedRevenue  = Object.entries(revenueLines).sort((a,b) => b[1].p - a[1].p);
-  const sortedDirect   = Object.entries(directLines).sort((a,b) => b[1].p - a[1].p);
-  const sortedOverhead = Object.entries(overheadLines).sort((a,b) => b[1].p - a[1].p);
-
+  
+  const sortedRevenue = Object.entries(revenueLines).sort((a,b) => b[1].month - a[1].month);
+  const sortedDirect = Object.entries(directLines).sort((a,b) => b[1].month - a[1].month);
+  const sortedOverhead = Object.entries(overheadLines).sort((a,b) => b[1].month - a[1].month);
+  
   output.innerHTML = `
-    <div class="report-section-title">${pLabel} — Profit & Loss</div>
-
+    <div class="report-section-title">${monthName(m)} ${y} — Profit & Loss</div>
+    
     <div style="overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;">
         <thead>
           <tr style="border-bottom:2px solid var(--plum);">
             <th style="text-align:left;padding:12px 0;color:var(--text-muted);font-size:12px;"></th>
-            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:12px;">${pLabel}</th>
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:12px;">${monthName(m).substring(0,3)}</th>
             <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:11px;">%</th>
-            ${showYtd ? `<th style="text-align:right;padding:12px;color:var(--text-muted);font-size:12px;">YTD</th><th style="text-align:right;padding:12px;color:var(--text-muted);font-size:11px;">%</th>` : ''}
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:12px;">YTD</th>
+            <th style="text-align:right;padding:12px;color:var(--text-muted);font-size:11px;">%</th>
           </tr>
         </thead>
         <tbody>
-          <tr><td colspan="${cols}" style="padding:16px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--plum);">Revenue</td></tr>
-          ${sortedRevenue.map(([cat, v]) => row(cat, v.p, v.ytd)).join('')}
-          ${pTips > 0 || ytdTips > 0 ? row('Tips', pTips, ytdTips) : ''}
-          ${pRent > 0 || ytdRent > 0 ? row('Booth Rent Collected', pRent, ytdRent) : ''}
-          ${subtotalRow('Total Revenue', pGross, ytdGross, 'var(--success)')}
-
-          <tr><td colspan="${cols}" style="padding:20px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--danger);">Cost of Goods / Direct Costs</td></tr>
-          ${sortedDirect.length > 0 ? sortedDirect.map(([cat, v]) => row(cat, v.p, v.ytd)).join('') : `<tr><td colspan="${cols}" style="padding:8px 16px;color:var(--text-muted);font-style:italic;">None this period</td></tr>`}
-          ${subtotalRow('Total Direct Costs', pDirect, ytdDirect, 'var(--danger)')}
-          ${subtotalRow('Gross Profit', pGrossProfit, ytdGrossProfit, pGrossProfit >= 0 ? 'var(--success)' : 'var(--danger)')}
-
-          <tr><td colspan="${cols}" style="padding:20px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--gold-dark);">Operating Expenses</td></tr>
-          ${sortedOverhead.length > 0 ? sortedOverhead.map(([cat, v]) => row(cat, v.p, v.ytd)).join('') : `<tr><td colspan="${cols}" style="padding:8px 16px;color:var(--text-muted);font-style:italic;">None this period</td></tr>`}
-          ${subtotalRow('Total Operating Expenses', pOverhead, ytdOverhead, 'var(--danger)')}
-
+          <tr><td colspan="5" style="padding:16px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--plum);">Revenue</td></tr>
+          ${sortedRevenue.map(([cat, v]) => row(cat, v.month, v.ytd)).join('')}
+          ${monthTips > 0 || ytdTips > 0 ? row('Tips', monthTips, ytdTips) : ''}
+          ${monthRent > 0 || ytdRent > 0 ? row('Booth Rent Collected', monthRent, ytdRent) : ''}
+          ${subtotalRow('Total Revenue', monthGrossRevenue, ytdGrossRevenue, 'var(--success)')}
+          
+          <tr><td colspan="5" style="padding:20px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--danger);">Cost of Goods / Direct Costs</td></tr>
+          ${sortedDirect.length > 0 ? sortedDirect.map(([cat, v]) => row(cat, v.month, v.ytd)).join('') : '<tr><td colspan="5" style="padding:8px 16px;color:var(--text-muted);font-style:italic;">None this period</td></tr>'}
+          ${subtotalRow('Total Direct Costs', monthDirectTotal, ytdDirectTotal, 'var(--danger)')}
+          ${subtotalRow('Gross Profit', monthGrossProfit, ytdGrossProfit, monthGrossProfit >= 0 ? 'var(--success)' : 'var(--danger)')}
+          
+          <tr><td colspan="5" style="padding:20px 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--gold-dark);">Operating Expenses</td></tr>
+          ${sortedOverhead.length > 0 ? sortedOverhead.map(([cat, v]) => row(cat, v.month, v.ytd)).join('') : '<tr><td colspan="5" style="padding:8px 16px;color:var(--text-muted);font-style:italic;">None this period</td></tr>'}
+          ${subtotalRow('Total Operating Expenses', monthOverheadTotal, ytdOverheadTotal, 'var(--danger)')}
+          
           <tr style="border-top:3px double var(--plum);font-weight:800;font-size:18px;">
             <td style="padding:16px 0;color:var(--text);">Net Income</td>
-            <td style="text-align:right;padding:16px;color:${pNet>=0?'var(--success)':'var(--danger)'};">${fmt(pNet)}</td>
-            <td style="text-align:right;padding:16px;font-size:14px;color:var(--text-muted);">${pctOf(pNet,pGross)}</td>
-            ${showYtd ? `<td style="text-align:right;padding:16px;color:${ytdNet>=0?'var(--success)':'var(--danger)'};">${fmt(ytdNet)}</td><td style="text-align:right;padding:16px;font-size:14px;color:var(--text-muted);">${pctOf(ytdNet,ytdGross)}</td>` : ''}
+            <td style="text-align:right;padding:16px;color:${monthNetIncome >= 0 ? 'var(--success)' : 'var(--danger)'};">${fmt(monthNetIncome)}</td>
+            <td style="text-align:right;padding:16px;font-size:14px;color:var(--text-muted);">${pctOf(monthNetIncome, monthGrossRevenue)}</td>
+            <td style="text-align:right;padding:16px;color:${ytdNetIncome >= 0 ? 'var(--success)' : 'var(--danger)'};">${fmt(ytdNetIncome)}</td>
+            <td style="text-align:right;padding:16px;font-size:14px;color:var(--text-muted);">${pctOf(ytdNetIncome, ytdGrossRevenue)}</td>
           </tr>
         </tbody>
       </table>
     </div>
-
+    
     <div class="card" style="margin-top:24px;background:var(--cream);">
-      <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:16px;">Key Metrics — ${pLabel}</div>
+      <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:16px;">Key Metrics</div>
       <div class="grid-4">
         <div style="text-align:center;">
           <div style="font-size:12px;color:var(--text-muted);">Gross Margin</div>
-          <div style="font-size:24px;font-weight:700;color:${pGrossProfit/pGross>=0.7?'var(--success)':'var(--gold-dark)'};">${pctOf(pGrossProfit,pGross)}</div>
+          <div style="font-size:24px;font-weight:700;color:${monthGrossProfit/monthGrossRevenue >= 0.7 ? 'var(--success)' : 'var(--gold-dark)'};">${pctOf(monthGrossProfit, monthGrossRevenue)}</div>
         </div>
         <div style="text-align:center;">
           <div style="font-size:12px;color:var(--text-muted);">Net Margin</div>
-          <div style="font-size:24px;font-weight:700;color:${pNet>=0?'var(--success)':'var(--danger)'};">${pctOf(pNet,pGross)}</div>
+          <div style="font-size:24px;font-weight:700;color:${monthNetIncome >= 0 ? 'var(--success)' : 'var(--danger)'};">${pctOf(monthNetIncome, monthGrossRevenue)}</div>
         </div>
         <div style="text-align:center;">
           <div style="font-size:12px;color:var(--text-muted);">Services Revenue</div>
-          <div style="font-size:24px;font-weight:700;color:var(--plum);">${pctOf(pServiceTotal+pTips,pGross)}</div>
+          <div style="font-size:24px;font-weight:700;color:var(--plum);">${pctOf(monthServiceTotal + monthTips, monthGrossRevenue)}</div>
         </div>
         <div style="text-align:center;">
           <div style="font-size:12px;color:var(--text-muted);">Booth Rent Revenue</div>
-          <div style="font-size:24px;font-weight:700;color:var(--plum);">${pctOf(pRent,pGross)}</div>
+          <div style="font-size:24px;font-weight:700;color:var(--plum);">${pctOf(monthRent, monthGrossRevenue)}</div>
         </div>
       </div>
     </div>
-
+    
     <div style="margin-top:16px;font-size:12px;color:var(--text-muted);line-height:1.6;">
       💡 <strong>Tip:</strong> Mark expense categories as "Direct" or "Overhead" in Settings → Categories to improve P&L accuracy.
     </div>
@@ -3598,16 +3467,22 @@ async function renderMonthCompareReport(output, controls) {
     </div>
   `;
   
-  const allTxns = await db.transactions.toArray();
-
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
   function getMonthData(month, year) {
     const monthStr = `${year}-${String(month).padStart(2, '0')}`;
     const txns = allTxns.filter(t => t.date?.startsWith(monthStr));
-
+    const mExp = allMExp.filter(e => e.year === year && e.month === month);
+    
     const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const expenses = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const expenses = dailyExp + monthlyExp;
     const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
-
+    
     return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
   }
   
@@ -3728,16 +3603,22 @@ async function renderYOYReport(output, controls) {
     </div>
   `;
   
-  const allTxns = await db.transactions.toArray();
-
+  const [allTxns, allMExp] = await Promise.all([
+    db.transactions.toArray(),
+    db.monthlyExpenses.toArray()
+  ]);
+  
   function getYearData(year) {
     const yearStr = String(year);
     const txns = allTxns.filter(t => t.date?.startsWith(yearStr));
-
+    const mExp = allMExp.filter(e => e.year === year);
+    
     const income = txns.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
-    const expenses = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const dailyExp = txns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mExp.reduce((s, e) => s + (e.amount || 0), 0);
+    const expenses = dailyExp + monthlyExp;
     const clients = new Set(txns.filter(t => t.type === 'INCOME' && t.clientName).map(t => t.clientName)).size;
-
+    
     return { income, expenses, net: income - expenses, clients, txnCount: txns.length };
   }
   
@@ -3928,15 +3809,10 @@ async function renderEmployeeReport(output, controls) {
   const totalCost = totalPay + totalTaxes;
   const netProfit = totalServices - totalCost;
   const profitMargin = totalServices > 0 ? ((netProfit / totalServices) * 100).toFixed(1) : 0;
-
+  
   // Sort weeks for display
   const sortedWeeks = Object.keys(weeklyData).sort().reverse();
   const weeksWorked = sortedWeeks.filter(w => weeklyData[w].services > 0 || weeklyData[w].pay > 0).length;
-
-  const BOOTH_RATE = 140;
-  const boothRenterNet = BOOTH_RATE * weeksWorked;
-  const boothDiff = netProfit - boothRenterNet;
-  const employeeIsBetter = boothDiff >= 0;
   
   // Period label
   const periodLabels = {
@@ -3989,30 +3865,14 @@ async function renderEmployeeReport(output, controls) {
       </div>
       
       <!-- Net Profit Banner -->
-      <div style="background:var(--plum); color:#fff; padding:24px; border-radius:12px; display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <div style="background:var(--plum); color:#fff; padding:24px; border-radius:12px; display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
         <div>
-          <div style="font-size:14px; opacity:0.9;">Net Profit to Annette (Employee)</div>
+          <div style="font-size:14px; opacity:0.9;">Net Profit to Annette</div>
           <div style="font-size:12px; opacity:0.7;">${profitMargin}% margin</div>
         </div>
         <div style="font-size:32px; font-weight:700;">${fmt(netProfit)}</div>
       </div>
-
-      <!-- Booth Renter Comparison -->
-      <div style="background:${employeeIsBetter ? '#d4edda' : '#f8d7da'}; border:1px solid ${employeeIsBetter ? '#c3e6cb' : '#f5c6cb'}; padding:20px; border-radius:12px; display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
-        <div>
-          <div style="font-size:14px; font-weight:600; color:${employeeIsBetter ? '#155724' : '#721c24'};">vs. Booth Renter @ $${BOOTH_RATE}/wk × ${weeksWorked} weeks</div>
-          <div style="font-size:12px; color:${employeeIsBetter ? '#155724' : '#721c24'}; margin-top:4px;">
-            ${employeeIsBetter
-              ? `Employee model earns ${fmt(boothDiff)} more`
-              : `Booth renter would earn ${fmt(Math.abs(boothDiff))} more`}
-          </div>
-        </div>
-        <div style="text-align:right;">
-          <div style="font-size:22px; font-weight:700; color:${employeeIsBetter ? '#155724' : '#721c24'};">${fmt(boothRenterNet)}</div>
-          <div style="font-size:11px; color:${employeeIsBetter ? '#155724' : '#721c24'};">booth renter net</div>
-        </div>
-      </div>
-
+      
       <!-- Stats Grid -->
       <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:24px;">
         <div style="background:var(--bg-card); padding:16px; border-radius:8px; text-align:center; border:1px solid var(--border);">
@@ -4638,17 +4498,6 @@ async function renderDataSettings(container) {
         <input type="file" id="import-file" accept=".json" style="display:none;" onchange="importBackup(this.files[0])">
       </div>
       
-      <div id="vagaro-migration-section" style="border-top:1px solid var(--border);padding-top:20px;margin-top:20px;">
-        <div class="settings-section-title" style="margin-bottom:12px;">Data Migration</div>
-        <div class="settings-item" style="align-items:flex-start;flex-direction:column;gap:12px;">
-          <div>
-            <div class="settings-item-label">Vagaro Income — Employee Field Migration</div>
-            <div class="settings-item-sub">Converts old <code>Chasity (Vagaro Income)</code> transactions to the new format with a separate <code>employee</code> field. A backup is downloaded before any changes are made.</div>
-          </div>
-          <button class="btn-secondary" onclick="migrateVagaroIncome()">Preview Migration</button>
-        </div>
-      </div>
-
       <div class="settings-item" style="border-top:2px solid var(--danger-bg);padding-top:20px;margin-top:20px;">
         <div>
           <div class="settings-item-label" style="color:var(--danger);">Clear All Data</div>
@@ -4658,129 +4507,6 @@ async function renderDataSettings(container) {
       </div>
     </div>
   `;
-}
-
-async function migrateVagaroIncome() {
-  const OLD_CATEGORY = 'Chasity (Vagaro Income)';
-  const NEW_CATEGORY = 'Vagaro Income';
-  const EMPLOYEE_NAME = 'Chasity McGill';
-
-  // Find affected transactions
-  let affected;
-  try {
-    affected = await db.transactions.where('category').equals(OLD_CATEGORY).toArray();
-  } catch(err) {
-    showToast('Error scanning transactions');
-    console.error(err);
-    return;
-  }
-
-  if (affected.length === 0) {
-    openModal(`
-      <h2 class="modal-title">Nothing to Migrate</h2>
-      <p style="margin-bottom:24px;color:var(--text);line-height:1.6;">No transactions found with category <strong>${OLD_CATEGORY}</strong>. Either the migration has already been run or there are no records to update.</p>
-      <button class="btn-secondary" style="width:100%;" onclick="closeModal()">Close</button>
-    `);
-    return;
-  }
-
-  // Build preview list (show up to 10)
-  const preview = affected.slice(0, 10).map(t =>
-    `<li style="padding:4px 0;font-size:13px;">${t.date} — ${t.category} — $${(t.amount || t.serviceAmount || 0).toLocaleString()}</li>`
-  ).join('');
-  const overflow = affected.length > 10 ? `<li style="font-size:13px;color:var(--text-muted);">…and ${affected.length - 10} more</li>` : '';
-
-  const confirmed = await new Promise(resolve => {
-    openModal(`
-      <h2 class="modal-title">Preview Migration</h2>
-      <p style="color:var(--text);line-height:1.6;margin-bottom:12px;">
-        Found <strong>${affected.length} transaction${affected.length !== 1 ? 's' : ''}</strong> with category <strong>${OLD_CATEGORY}</strong>.
-        These will be updated to <strong>category: "${NEW_CATEGORY}"</strong> + <strong>employee: "${EMPLOYEE_NAME}"</strong>.
-      </p>
-      <ul style="margin:0 0 16px 0;padding-left:18px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px 12px;">
-        ${preview}${overflow}
-      </ul>
-      <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">A backup of these transactions will be downloaded before any changes are made.</p>
-      <div style="display:flex;gap:12px;">
-        <button class="btn-secondary" style="flex:1;" onclick="closeModal();window._confirmResolve(false)">Cancel</button>
-        <button class="btn-primary" style="flex:1;" onclick="closeModal();window._confirmResolve(true)">Download Backup &amp; Migrate</button>
-      </div>
-    `);
-    window._confirmResolve = resolve;
-  });
-
-  if (!confirmed) return;
-
-  // Download backup of affected transactions
-  try {
-    const backupData = {
-      exportDate: new Date().toISOString(),
-      description: 'Pre-migration backup — Vagaro Income employee field migration',
-      affectedCount: affected.length,
-      transactions: affected
-    };
-    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `vagaro-migration-backup-${todayStr()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch(err) {
-    showToast('Error creating backup — migration aborted');
-    console.error(err);
-    return;
-  }
-
-  // Migrate in batches of 50
-  const BATCH_SIZE = 50;
-  let migrated = 0;
-  try {
-    for (let i = 0; i < affected.length; i += BATCH_SIZE) {
-      const batch = affected.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(t =>
-        db.transactions.update(t.id, { category: NEW_CATEGORY, employee: EMPLOYEE_NAME })
-      ));
-      migrated += batch.length;
-    }
-  } catch(err) {
-    showToast(`Error after ${migrated} updates — migration stopped. Restore from backup if needed.`);
-    console.error(err);
-    return;
-  }
-
-  // Success — offer to remove old category
-  const removeOld = await new Promise(resolve => {
-    openModal(`
-      <h2 class="modal-title">Migration Complete ✓</h2>
-      <p style="color:var(--text);line-height:1.6;margin-bottom:20px;">
-        Successfully migrated <strong>${migrated} transaction${migrated !== 1 ? 's' : ''}</strong>.<br><br>
-        Would you like to remove <strong>"${OLD_CATEGORY}"</strong> from your income categories? It is no longer needed.
-      </p>
-      <div style="display:flex;gap:12px;">
-        <button class="btn-secondary" style="flex:1;" onclick="closeModal();window._confirmResolve(false)">Keep It</button>
-        <button class="btn-primary" style="flex:1;" onclick="closeModal();window._confirmResolve(true)">Remove It</button>
-      </div>
-    `);
-    window._confirmResolve = resolve;
-  });
-
-  if (removeOld) {
-    await removeLegacyVagaroCategory(OLD_CATEGORY);
-  } else {
-    showToast('Migration complete ✓');
-  }
-}
-
-async function removeLegacyVagaroCategory(categoryName) {
-  const idx = state.categories.INCOME.indexOf(categoryName);
-  if (idx === -1) {
-    showToast('Category not found — may already be removed');
-    return;
-  }
-  state.categories.INCOME.splice(idx, 1);
-  await saveCategories();
-  showToast('Migration complete — old category removed ✓');
 }
 
 async function exportBackup() {
@@ -5022,10 +4748,11 @@ function parseTransactionList(data) {
     const firstCell = String(row[0] || '');
     const secondCell = String(row[1] || '');
     
-    if (firstCell.includes(' to ')) {
+    // Check for date range - handle both old format " to " and new format " - "
+    if (firstCell.includes(' to ') || firstCell.includes(' - ')) {
       dateRange = firstCell;
-      // Parse dates: "Mar 8, 2026 to Mar 14, 2026"
-      const match = firstCell.match(/(\w+\s+\d+,\s*\d+)\s+to\s+(\w+\s+\d+,\s*\d+)/);
+      // Parse dates: "Mar 8, 2026 to Mar 14, 2026" OR "Jul 19, 2026 - Jul 25, 2026"
+      const match = firstCell.match(/(\w+\s+\d+,\s*\d+)\s+(?:to|-)\s+(\w+\s+\d+,\s*\d+)/);
       if (match) {
         try {
           const startDate = new Date(match[1]);
@@ -5529,70 +5256,6 @@ function closeAskOverlay() {
   document.getElementById('ai-ask-overlay').classList.add('hidden');
 }
 
-function exportAiChat() {
-  const history = window._aiChatHistory;
-  if (!history || history.length === 0) {
-    alert('No conversation to export yet. Ask a question first!');
-    return;
-  }
-
-  const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const time = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-  let text = `Mane Frame AI Chat Export\n${date} at ${time}\n${'─'.repeat(40)}\n\n`;
-  history.forEach(msg => {
-    const label = msg.role === 'user' ? 'You' : 'Mane Frame AI';
-    text += `${label}:\n${msg.content}\n\n`;
-  });
-  window._aiExportText = text;
-
-  // Show export modal
-  const existing = document.getElementById('ai-export-modal');
-  if (existing) existing.remove();
-
-  const modal = document.createElement('div');
-  modal.id = 'ai-export-modal';
-  modal.style.cssText = `position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);`;
-  modal.innerHTML = `
-    <div style="background:#fff;border-radius:12px;padding:24px;width:320px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
-      <div style="font-size:16px;font-weight:700;color:#333;margin-bottom:16px;">Export Chat</div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        <button onclick="aiExportCopy()" style="padding:12px 16px;background:#f5f0f5;border:1px solid #ddd;border-radius:8px;font-size:14px;color:#333;cursor:pointer;text-align:left;">📋  Copy to Clipboard</button>
-        <button onclick="aiExportDownload()" style="padding:12px 16px;background:#f5f0f5;border:1px solid #ddd;border-radius:8px;font-size:14px;color:#333;cursor:pointer;text-align:left;">⬇️  Download as Text File</button>
-        <button onclick="aiExportEmail()" style="padding:12px 16px;background:#f5f0f5;border:1px solid #ddd;border-radius:8px;font-size:14px;color:#333;cursor:pointer;text-align:left;">✉️  Send via Email</button>
-        <button onclick="document.getElementById('ai-export-modal').remove()" style="padding:10px;background:none;border:none;font-size:14px;color:#999;cursor:pointer;">Cancel</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
-}
-
-function aiExportCopy() {
-  document.getElementById('ai-export-modal')?.remove();
-  navigator.clipboard.writeText(window._aiExportText || '').then(() => {
-    const btn = document.getElementById('ai-export-btn');
-    if (btn) { btn.textContent = '✅'; setTimeout(() => { btn.textContent = '📤'; }, 2000); }
-  }).catch(() => alert('Could not copy. Try downloading instead.'));
-}
-
-function aiExportDownload() {
-  document.getElementById('ai-export-modal')?.remove();
-  const blob = new Blob([window._aiExportText || ''], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `mane-frame-chat-${new Date().toISOString().split('T')[0]}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function aiExportEmail() {
-  document.getElementById('ai-export-modal')?.remove();
-  const subject = encodeURIComponent(`Mane Frame AI Chat – ${new Date().toLocaleDateString()}`);
-  const body = encodeURIComponent(window._aiExportText || '');
-  window.open(`mailto:?subject=${subject}&body=${body}`, '_blank');
-}
-
 function askSuggestion(btn) {
   document.getElementById('ai-ask-input').value = btn.textContent;
   sendAskQuery();
@@ -5663,8 +5326,9 @@ async function sendAskQuery() {
 }
 
 async function buildBusinessSnapshot() {
-  const [txns, renters, rentPmts] = await Promise.all([
+  const [txns, mExp, renters, rentPmts] = await Promise.all([
     db.transactions.toArray(),
+    db.monthlyExpenses.toArray(),
     db.renters.toArray(),
     db.rentPayments.toArray()
   ]);
@@ -5681,14 +5345,14 @@ async function buildBusinessSnapshot() {
     let y = curYear;
     while (m <= 0) { m += 12; y--; }
     const monthStr = `${y}-${String(m).padStart(2, '0')}`;
-    const mTxns   = txns.filter(t => t.date?.startsWith(monthStr));
+    const mTxns = txns.filter(t => t.date?.startsWith(monthStr));
+    const mMExp = mExp.filter(e => e.year === y && e.month === m);
+    
     const mIncome = mTxns.filter(t => t.type === 'INCOME');
-    const mExp    = mTxns.filter(t => t.type === 'EXPENSE');
-
-    const services   = mIncome.reduce((s, t) => s + (t.serviceAmount || 0), 0);
-    const tips       = mIncome.reduce((s, t) => s + (t.tipAmount || 0), 0);
-    const dailyExp   = mExp.filter(t => !t.recurring).reduce((s, t) => s + (t.amount || 0), 0);
-    const monthlyExp = mExp.filter(t => t.recurring).reduce((s, t) => s + (t.amount || 0), 0);
+    const services = mIncome.reduce((s, t) => s + (t.serviceAmount || 0), 0);
+    const tips = mIncome.reduce((s, t) => s + (t.tipAmount || 0), 0);
+    const dailyExp = mTxns.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+    const monthlyExp = mMExp.reduce((s, e) => s + (e.amount || 0), 0);
     const rentCollected = rentPmts.filter(p => p.datePaid?.startsWith(monthStr)).reduce((s, p) => s + (p.amount || 0), 0);
     const uniqueClients = new Set(mIncome.filter(t => t.clientName?.trim()).map(t => t.clientName.trim().toLowerCase())).size;
     
@@ -5758,72 +5422,6 @@ async function buildBusinessSnapshot() {
       lastVisit: c.lastVisit
     }));
   
-  // Employee performance (YTD)
-  const employees = state.employees || ['Chasity McGill'];
-  const empYearStart = `${curYear}-01-01`;
-  const empYearEnd = todayStr();
-
-  function getEmpWeekStart(dateStr) {
-    const d = new Date(dateStr + 'T12:00:00');
-    d.setDate(d.getDate() - d.getDay());
-    return d.toISOString().split('T')[0];
-  }
-
-  const employeeSnapshots = employees.map(empName => {
-    const legacyCat = `${empName.split(' ')[0]} (Vagaro Income)`;
-    const empIncomeTxns = txns.filter(t =>
-      t.type === 'INCOME' &&
-      t.date >= empYearStart && t.date <= empYearEnd &&
-      ((t.category === 'Vagaro Income' && t.employee === empName) || t.category === legacyCat)
-    );
-    const empExpenseTxns = txns.filter(t =>
-      t.type === 'EXPENSE' &&
-      t.category === 'Employee Pay' &&
-      t.date >= empYearStart && t.date <= empYearEnd &&
-      (t.employee === empName || (!t.employee && empName === 'Chasity McGill'))
-    );
-
-    let empServices = 0, empTips = 0, empPay = 0, empTaxes = 0;
-    const empWeeks = {};
-
-    empIncomeTxns.forEach(t => {
-      const ws = getEmpWeekStart(t.date);
-      if (!empWeeks[ws]) empWeeks[ws] = { services: 0, tips: 0, pay: 0, taxes: 0 };
-      const svc = t.serviceAmount || t.amount || 0;
-      empServices += svc;
-      empWeeks[ws].services += svc;
-      const tips = t.employeeTips || parseFloat(t.notes?.match(/Tips:\s*\$?([\d.]+)/i)?.[1] || 0) || t.tipAmount || 0;
-      empTips += tips;
-      empWeeks[ws].tips += tips;
-    });
-
-    empExpenseTxns.forEach(t => {
-      const ws = getEmpWeekStart(t.date);
-      if (!empWeeks[ws]) empWeeks[ws] = { services: 0, tips: 0, pay: 0, taxes: 0 };
-      const amt = t.amount || 0;
-      if (t.payType === 'taxes' || t.notes?.toLowerCase().includes('tax')) {
-        empTaxes += amt;
-        empWeeks[ws].taxes += amt;
-      } else {
-        empPay += amt;
-        empWeeks[ws].pay += amt;
-      }
-    });
-
-    const empTotalCost = empPay + empTaxes;
-    const empNetProfit = empServices - empTotalCost;
-    const empMargin = empServices > 0 ? ((empNetProfit / empServices) * 100).toFixed(1) : 0;
-    const weeksWorked = Object.values(empWeeks).filter(w => w.services > 0 || w.pay > 0).length;
-    const avgWeeklyRevenue = weeksWorked > 0 ? (empServices / weeksWorked).toFixed(0) : 0;
-    const avgWeeklyPay = weeksWorked > 0 ? (empTotalCost / weeksWorked).toFixed(0) : 0;
-    const avgWeeklyNet = weeksWorked > 0 ? (empNetProfit / weeksWorked).toFixed(0) : 0;
-    const BOOTH_RATE = 140;
-    const boothNet = BOOTH_RATE * weeksWorked;
-    const boothDiff = empNetProfit - boothNet;
-
-    return `- ${empName}: Revenue $${empServices.toFixed(0)}, Tips $${empTips.toFixed(0)} (kept by employee), Pay $${empPay.toFixed(0)}, Taxes $${empTaxes.toFixed(0)}, Total Cost $${empTotalCost.toFixed(0)}, Net Profit $${empNetProfit.toFixed(0)}, Margin ${empMargin}%, Weeks Worked ${weeksWorked}, Avg/Week: Revenue $${avgWeeklyRevenue} | Cost $${avgWeeklyPay} | Net $${avgWeeklyNet} | Booth renter equivalent (${weeksWorked}wks × $${BOOTH_RATE}) = $${boothNet.toFixed(0)} (employee ${boothDiff >= 0 ? 'earns' : 'costs'} $${Math.abs(boothDiff).toFixed(0)} ${boothDiff >= 0 ? 'more' : 'less'} than booth renter would)`;
-  });
-
   // Booth renters with payment history
   const activeRenters = renters.filter(r => r.status === 'active');
   const renterDetails = activeRenters.map(r => {
@@ -5853,89 +5451,12 @@ async function buildBusinessSnapshot() {
     };
   });
   
-  // P&L summary (YTD and current month)
-  const directCatsDoc = await db.settings.get('directCostCategories');
-  const directCats = directCatsDoc?.value ? JSON.parse(directCatsDoc.value) : [];
-  const isDirect = cat => directCats.includes(cat);
-
-  const buildPnl = (filterTxns, filterMExp, filterRentPmts) => {
-    const revLines = {}, dirLines = {}, ovhLines = {};
-    filterTxns.filter(t => t.type === 'INCOME').forEach(t => {
-      const k = t.category || 'Other';
-      if (!revLines[k]) revLines[k] = 0;
-      revLines[k] += (t.serviceAmount || 0);
-    });
-    const tips = filterTxns.filter(t => t.type==='INCOME').reduce((s,t)=>s+(t.tipAmount||0),0);
-    const rent = filterRentPmts.reduce((s,p)=>s+(p.amount||0),0);
-    const grossRev = Object.values(revLines).reduce((s,v)=>s+v,0) + tips + rent;
-    filterTxns.filter(t => t.type==='EXPENSE').forEach(t => {
-      const k = t.category||'Other', b = isDirect(k)?dirLines:ovhLines;
-      if (!b[k]) b[k]=0; b[k]+=(t.amount||0);
-    });
-    filterMExp.forEach(e => {
-      const k = e.category||'Other', b = isDirect(k)?dirLines:ovhLines;
-      if (!b[k]) b[k]=0; b[k]+=(e.amount||0);
-    });
-    const totalDirect  = Object.values(dirLines).reduce((s,v)=>s+v,0);
-    const totalOverhead= Object.values(ovhLines).reduce((s,v)=>s+v,0);
-    const grossProfit  = grossRev - totalDirect;
-    const netIncome    = grossRev - totalDirect - totalOverhead;
-    const pct = (v,t) => t>0 ? `(${((v/t)*100).toFixed(1)}%)` : '';
-    return {
-      revenue: Object.entries(revLines).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`  ${k}: $${Math.round(v)}`).join('\n'),
-      tips: Math.round(tips), rent: Math.round(rent),
-      grossRevenue: Math.round(grossRev),
-      directCosts: Object.entries(dirLines).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`  ${k}: $${Math.round(v)}`).join('\n') || '  None',
-      totalDirect: Math.round(totalDirect),
-      grossProfit: Math.round(grossProfit), grossMargin: pct(grossProfit, grossRev),
-      overhead: Object.entries(ovhLines).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`  ${k}: $${Math.round(v)}`).join('\n') || '  None',
-      totalOverhead: Math.round(totalOverhead),
-      netIncome: Math.round(netIncome), netMargin: pct(netIncome, grossRev),
-    };
-  };
-
-  const curMonthStr = `${curYear}-${String(curMonth).padStart(2,'0')}`;
-  const ytdPnl = buildPnl(
-    txns.filter(t => t.date?.startsWith(yearStr)),
-    mExp.filter(e => e.year === curYear),
-    rentPmts.filter(p => p.datePaid?.startsWith(yearStr))
-  );
-  const monthPnl = buildPnl(
-    txns.filter(t => t.date?.startsWith(curMonthStr)),
-    mExp.filter(e => e.year === curYear && e.month === curMonth),
-    rentPmts.filter(p => p.datePaid?.startsWith(curMonthStr))
-  );
-
-  // Build readable snapshot string
+  // Build readable snapshot string (like mobile)
   const snapshot = `
 BUSINESS SNAPSHOT (as of ${now.toLocaleDateString()}):
-Owner: Annette | Business: Hair Salon ("Mane Frame")
-Employees: ${employees.join(', ')} (income tracked via "Vagaro Income" category with employee field)
-
-EMPLOYEE PERFORMANCE (${curYear} YTD):
-${employeeSnapshots.join('\n') || 'No employee data'}
-Note: Net Profit = Revenue generated by employee minus their pay and employer taxes. Tips are kept by the employee and not included in salon profit calculations. To estimate profitability of adding another employee, use the avg weekly revenue and cost figures above scaled by expected weeks worked.
 
 MONTHLY PERFORMANCE (last 6 months):
 ${monthlySummaries.map(m => `${m.month} ${m.year}: Income $${m.totalIncome} (Services $${m.services}, Tips $${m.tips}, Rent $${m.rentCollected}) | Expenses $${m.totalExpenses} | Net $${m.netProfit} | Unique clients: ${m.uniqueClients}`).join('\n')}
-
-P&L — YEAR TO DATE ${curYear}:
-Revenue by category:
-${ytdPnl.revenue}
-  Tips: $${ytdPnl.tips}
-  Booth Rent Collected: $${ytdPnl.rent}
-TOTAL REVENUE: $${ytdPnl.grossRevenue}
-Direct Costs (COGS):
-${ytdPnl.directCosts}
-  Total Direct: $${ytdPnl.totalDirect}
-GROSS PROFIT: $${ytdPnl.grossProfit} ${ytdPnl.grossMargin}
-Operating Expenses (Overhead):
-${ytdPnl.overhead}
-  Total Overhead: $${ytdPnl.totalOverhead}
-NET INCOME: $${ytdPnl.netIncome} ${ytdPnl.netMargin}
-
-P&L — ${monthName(curMonth)} ${curYear} (current month):
-TOTAL REVENUE: $${monthPnl.grossRevenue} | GROSS PROFIT: $${monthPnl.grossProfit} ${monthPnl.grossMargin} | NET INCOME: $${monthPnl.netIncome} ${monthPnl.netMargin}
 
 TOP SERVICE CATEGORIES (YTD by revenue):
 ${topServices.map(s => `${s.category}: $${Math.round(s.total)} (${s.count} transactions, $${Math.round(s.tips)} in tips)`).join('\n')}
@@ -6008,67 +5529,6 @@ async function checkPin() {
 
 let _appBooted = false;
 
-async function migrateMonthlyExpensesToTransactions() {
-  const FLAG_KEY = 'mf_monthly_migrated_v1';
-  if (localStorage.getItem(FLAG_KEY)) return;
-
-  const all = await db.monthlyExpenses.toArray();
-  if (all.length === 0) {
-    localStorage.setItem(FLAG_KEY, '1');
-    return;
-  }
-
-  const records = all.map(e => {
-    const lastDay = new Date(e.year, e.month, 0).getDate();
-    const date = `${e.year}-${String(e.month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
-    return {
-      date,
-      type: 'EXPENSE',
-      category:            e.category,
-      amount:              e.amount,
-      notes:               e.notes || '',
-      paymentMethod:       '',
-      serviceAmount:       0,
-      tipAmount:           0,
-      recurring:           true,
-      usualPayDay:         null,
-      migratedFromMonthly: true,
-    };
-  });
-
-  await db.transactions.bulkAdd(records);
-  localStorage.setItem(FLAG_KEY, '1');
-  console.log(`Migrated ${records.length} monthly expenses to transactions.`);
-}
-
-async function checkRecurringExpenseReminders() {
-  const today      = todayStr();
-  const todayDay   = parseInt(today.split('-')[2]);
-  const monthPrefix = today.slice(0, 7);
-
-  const all       = await db.transactions.toArray();
-  const recurring = all.filter(t => t.type === 'EXPENSE' && t.recurring && t.usualPayDay);
-  if (recurring.length === 0) return;
-
-  const categoryMap = {};
-  recurring.forEach(t => {
-    if (!categoryMap[t.category]) categoryMap[t.category] = t.usualPayDay;
-  });
-
-  const reminders = [];
-  for (const [category, payDay] of Object.entries(categoryMap)) {
-    if (todayDay < payDay) continue;
-    const paidThisMonth = all.some(t =>
-      t.type === 'EXPENSE' && t.category === category && t.date.startsWith(monthPrefix)
-    );
-    if (!paidThisMonth) reminders.push(category);
-  }
-
-  reminders.forEach((cat, i) => {
-    setTimeout(() => showToast(`Reminder: Did you add "${cat}" this month?`), i * 2500);
-  });
-}
-
 async function bootApp() {
   if (_appBooted) return;
   _appBooted = true;
@@ -6081,22 +5541,17 @@ async function bootApp() {
     document.getElementById('user-avatar').textContent = (user.displayName || user.email || 'U').charAt(0).toUpperCase();
   }
   
-  await migrateMonthlyExpensesToTransactions();
-
   // Load categories
   await loadCategories();
-
+  
   // Load employees
   await loadEmployees();
-
+  
   // Check renters tab visibility
   await updateRentersTabVisibility();
-
+  
   // Navigate to dashboard
   navigate('dashboard');
-
-  // Fire-and-forget reminder check
-  setTimeout(() => checkRecurringExpenseReminders(), 2000);
 }
 
 // ----------------------------------------------------------------
