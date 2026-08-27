@@ -1948,26 +1948,6 @@ html, body {
   color: var(--danger);
 }
 
-.ai-export-btn {
-  width: 36px;
-  height: 36px;
-  border: none;
-  background: var(--cream);
-  border-radius: 50%;
-  font-size: 18px;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-}
-
-.ai-export-btn:hover {
-  background: var(--plum-light);
-  color: var(--plum);
-}
-
 .ai-messages {
   flex: 1;
   overflow-y: auto;
