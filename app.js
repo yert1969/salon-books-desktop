@@ -261,6 +261,20 @@ function escapeHTML(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 }
+// Privacy: turn a person's name into initials for data sent to the AI.
+// Repeated initials get a number so different people stay distinct.
+function makeNameAliaser() {
+  const byName = {}, used = {};
+  return name => {
+    const key = (name || '').trim().toLowerCase();
+    if (!key) return 'Unknown';
+    if (byName[key]) return byName[key];
+    const initials = key.split(/\s+/).filter(Boolean).map(p => p[0].toUpperCase() + '.').join('');
+    used[initials] = (used[initials] || 0) + 1;
+    return byName[key] = used[initials] > 1 ? `${initials} (${used[initials]})` : initials;
+  };
+}
+
 
 function monthName(num) {
   return new Date(2000, num - 1, 1).toLocaleString('en-US', { month: 'long' });
@@ -5606,6 +5620,7 @@ async function sendAskQuery() {
 }
 
 async function buildBusinessSnapshot() {
+  const alias = makeNameAliaser();
   const [txns, renters, rentPmts] = await Promise.all([
     db.transactions.toArray(),
     db.renters.toArray(),
@@ -5877,11 +5892,11 @@ ${topServices.map(s => `${s.category}: $${Math.round(s.total)} (${s.count} trans
 TOP EXPENSE CATEGORIES (YTD):
 ${topExpenses.map(e => `${e.category}: $${e.amount}`).join('\n')}
 
-TOP CLIENTS (by total spend):
-${topClients.map(c => `${c.name}: ${c.visits} visits, $${c.totalSpend} total, $${c.tips} tips ($${c.avgTip} avg tip), last visit ${c.lastVisit}`).join('\n')}
+TOP CLIENTS (by total spend) (Client and renter names are shown as initials for privacy.):
+${topClients.map(c => `${alias(c.name)}: ${c.visits} visits, $${c.totalSpend} total, $${c.tips} tips ($${c.avgTip} avg tip), last visit ${c.lastVisit}`).join('\n')}
 
 BOOTH RENTERS (${activeRenters.length} active):
-${renterDetails.map(r => `${r.name}: $${r.weeklyRate}/week, ${r.totalPayments} payments ($${r.totalPaid} total), last 8 weeks: ${r.last8Weeks.onTime} on-time, ${r.last8Weeks.late} late, ${r.last8Weeks.missed} missed`).join('\n') || 'None'}
+${renterDetails.map(r => `${alias(r.name)}: $${r.weeklyRate}/week, ${r.totalPayments} payments ($${r.totalPaid} total), last 8 weeks: ${r.last8Weeks.onTime} on-time, ${r.last8Weeks.late} late, ${r.last8Weeks.missed} missed`).join('\n') || 'None'}
 `.trim();
 
   return snapshot;
