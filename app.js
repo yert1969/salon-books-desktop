@@ -196,6 +196,7 @@ const state = {
   transactionsToShow: 30,
   entriesTypeFilter: 'all',
   entriesCategoryFilter: '',
+  entriesSearch: { text: '', from: '', to: '', amountOp: '', amount1: '', amount2: '' },
   dashboardMonth: new Date().getMonth() + 1,
   dashboardYear: new Date().getFullYear(),
   clientSort: 'total',
@@ -1294,92 +1295,141 @@ async function renderMonthlyEntries(container) {
 }
 
 async function renderAllEntries(container) {
-  let allTransactions = await db.transactions.toArray();
-
-  // Sort by date descending
+  const allTransactions = await db.transactions.toArray();
   allTransactions.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  window._allEntriesCache = allTransactions;
 
-  // Build category options from all transactions (deduplicated)
   const allCategories = [...new Set(allTransactions.map(t => t.category).filter(Boolean))].sort();
   const typeF = state.entriesTypeFilter;
   const catF = state.entriesCategoryFilter;
-
-  // Apply filters
-  let filtered = allTransactions;
-  if (typeF === 'income') filtered = filtered.filter(t => t.type === 'INCOME');
-  else if (typeF === 'expense') filtered = filtered.filter(t => t.type === 'EXPENSE');
-  if (catF) filtered = filtered.filter(t => t.category === catF);
-
-  const toShow = state.transactionsToShow;
-  const display = filtered.slice(0, toShow);
-  const hasMore = filtered.length > toShow;
+  const f = state.entriesSearch;
 
   const catOptions = allCategories.map(c =>
     `<option value="${escapeHTML(c)}" ${catF === c ? 'selected' : ''}>${escapeHTML(c)}</option>`
   ).join('');
+  const inputStyle = 'padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px;';
+  const opt = (v, label) => `<option value="${v}" ${f.amountOp === v ? 'selected' : ''}>${label}</option>`;
 
-  let html = `
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;">
+  container.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
       <div style="display:flex;gap:4px;">
         <button class="view-tab ${typeF === 'all' ? 'active' : ''}" onclick="setEntriesFilter('all','')">All</button>
         <button class="view-tab ${typeF === 'income' ? 'active' : ''}" onclick="setEntriesFilter('income','')">Income</button>
         <button class="view-tab ${typeF === 'expense' ? 'active' : ''}" onclick="setEntriesFilter('expense','')">Expenses</button>
       </div>
-      <select onchange="setEntriesFilter('${typeF}', this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:13px;cursor:pointer;">
+      <select onchange="setEntriesFilter(state.entriesTypeFilter, this.value)" style="${inputStyle}cursor:pointer;">
         <option value="">All Categories</option>
         ${catOptions}
       </select>
-      ${(typeF !== 'all' || catF) ? `<button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="setEntriesFilter('all','')">Clear</button>` : ''}
+      <input type="search" id="entries-search-text" placeholder="Search client, category, notes…" value="${escapeHTML(f.text)}"
+        oninput="updateEntriesSearch('text', this.value)" style="${inputStyle}flex:1;min-width:200px;">
     </div>
-    <div style="margin-bottom:16px;font-size:14px;color:var(--text-muted);">
-      Showing ${display.length} of ${filtered.length} entries${filtered.length !== allTransactions.length ? ` (filtered from ${allTransactions.length})` : ''}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;font-size:13px;color:var(--text-muted);">
+      <span>From</span>
+      <input type="date" value="${f.from}" onchange="updateEntriesSearch('from', this.value)" style="${inputStyle}">
+      <span>to</span>
+      <input type="date" value="${f.to}" onchange="updateEntriesSearch('to', this.value)" style="${inputStyle}">
+      <span style="margin-left:8px;">Amount</span>
+      <select onchange="updateEntriesSearch('amountOp', this.value)" style="${inputStyle}cursor:pointer;">
+        ${opt('', 'Any')}${opt('eq', 'Exactly')}${opt('gt', 'Over')}${opt('lt', 'Under')}${opt('between', 'Between')}
+      </select>
+      <span id="entries-amount-inputs" style="display:${f.amountOp ? 'inline-flex' : 'none'};gap:6px;align-items:center;">
+        $<input type="number" step="0.01" min="0" value="${f.amount1}" oninput="updateEntriesSearch('amount1', this.value)" style="${inputStyle}width:90px;">
+        <span id="entries-amount2" style="display:${f.amountOp === 'between' ? 'inline-flex' : 'none'};gap:6px;align-items:center;">
+          and $<input type="number" step="0.01" min="0" value="${f.amount2}" oninput="updateEntriesSearch('amount2', this.value)" style="${inputStyle}width:90px;">
+        </span>
+      </span>
+    </div>
+    <div id="all-entries-results"></div>
+  `;
+  renderAllEntriesResults();
+}
+
+// Entries matching every active filter (type, category, text, dates, amount)
+function filterAllEntries(all) {
+  const typeF = state.entriesTypeFilter, catF = state.entriesCategoryFilter, f = state.entriesSearch;
+  const text = f.text.trim().toLowerCase();
+  const a1 = parseFloat(f.amount1), a2 = parseFloat(f.amount2);
+  return all.filter(t => {
+    if (typeF === 'income' && t.type !== 'INCOME') return false;
+    if (typeF === 'expense' && t.type !== 'EXPENSE') return false;
+    if (catF && t.category !== catF) return false;
+    if (f.from && (t.date || '') < f.from) return false;
+    if (f.to && (t.date || '') > f.to) return false;
+    if (text && ![t.category, t.notes, t.clientName, t.employee].some(v => v && String(v).toLowerCase().includes(text))) return false;
+    if (f.amountOp && !isNaN(a1)) {
+      // Same total the list displays: service + tip for income
+      const amt = t.type === 'INCOME' ? (t.serviceAmount || 0) + (t.tipAmount || 0) : (t.amount || 0);
+      if (f.amountOp === 'eq' && Math.abs(amt - a1) >= 0.005) return false;
+      if (f.amountOp === 'gt' && !(amt > a1)) return false;
+      if (f.amountOp === 'lt' && !(amt < a1)) return false;
+      if (f.amountOp === 'between' && !isNaN(a2) && (amt < Math.min(a1, a2) || amt > Math.max(a1, a2))) return false;
+    }
+    return true;
+  });
+}
+
+// Re-renders only the results so the search box keeps focus while typing
+function renderAllEntriesResults() {
+  const container = document.getElementById('all-entries-results');
+  if (!container) return;
+  const all = window._allEntriesCache || [];
+  const filtered = filterAllEntries(all);
+  const toShow = state.transactionsToShow;
+  const display = filtered.slice(0, toShow);
+  const f = state.entriesSearch;
+  const anyFilter = state.entriesTypeFilter !== 'all' || state.entriesCategoryFilter || f.text.trim() || f.from || f.to || f.amountOp;
+
+  const incomeTotal = filtered.filter(t => t.type === 'INCOME').reduce((s, t) => s + (t.serviceAmount || 0) + (t.tipAmount || 0), 0);
+  const expenseTotal = filtered.filter(t => t.type === 'EXPENSE').reduce((s, t) => s + (t.amount || 0), 0);
+
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px;font-size:14px;color:var(--text-muted);">
+      <div>
+        Showing ${display.length} of ${filtered.length} entries${filtered.length !== all.length ? ` (filtered from ${all.length})` : ''}
+        ${anyFilter && filtered.length ? ` · Income ${fmt(incomeTotal)} · Expenses ${fmt(expenseTotal)}` : ''}
+      </div>
+      ${anyFilter ? `<button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="clearEntriesSearch()">Clear filters</button>` : ''}
     </div>
     <div class="transaction-list">
   `;
-  
-  // Group by date
+
+  if (!filtered.length) {
+    html += `<div class="empty-state"><div class="empty-title">No matching entries</div><div class="empty-text">Try a different search or clear the filters</div></div>`;
+  }
+
   const grouped = {};
-  display.forEach(t => {
-    const key = t._isMonthly ? `monthly-${t.year}-${t.month}` : t.date;
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(t);
-  });
-  
-  Object.keys(grouped).sort().reverse().forEach(key => {
-    const items = grouped[key];
-    const isMonthly = key.startsWith('monthly-');
-    const label = isMonthly ? `${monthName(items[0].month)} ${items[0].year} — Monthly` : formatDateShort(key);
-    
-    html += `<div class="transaction-group"><div class="transaction-date">${label}</div>`;
-    items.forEach(t => {
-      if (t._isMonthly) {
-        html += `
-          <div class="transaction-item" onclick="openEditMonthlyExpenseModal('${t.id}')">
-            <div class="transaction-icon expense">🏠</div>
-            <div class="transaction-details">
-              <div class="transaction-category">${t.category} <span style="background:var(--plum);color:white;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:6px;">Monthly</span></div>
-              <div class="transaction-meta">${t.notes || ''}</div>
-            </div>
-            <div class="transaction-amount expense">-${fmt(t.amount)}</div>
-          </div>
-        `;
-      } else {
-        html += renderTransactionItem(t);
-      }
-    });
+  display.forEach(t => { (grouped[t.date] ||= []).push(t); });
+  Object.keys(grouped).sort().reverse().forEach(date => {
+    html += `<div class="transaction-group"><div class="transaction-date">${formatDateShort(date)}</div>`;
+    grouped[date].forEach(t => { html += renderTransactionItem(t); });
     html += `</div>`;
   });
-  
-  if (hasMore) {
+
+  if (filtered.length > toShow) {
     html += `
       <button class="btn-secondary" style="width:100%;margin-top:16px;" onclick="loadMoreTransactions()">
-        Load More (${allTransactions.length - toShow} remaining)
+        Load More (${filtered.length - toShow} remaining)
       </button>
     `;
   }
-  
   html += `</div>`;
   container.innerHTML = html;
+}
+
+function updateEntriesSearch(field, value) {
+  state.entriesSearch[field] = value;
+  state.transactionsToShow = 30;
+  if (field === 'amountOp') {
+    document.getElementById('entries-amount-inputs').style.display = value ? 'inline-flex' : 'none';
+    document.getElementById('entries-amount2').style.display = value === 'between' ? 'inline-flex' : 'none';
+  }
+  renderAllEntriesResults();
+}
+
+function clearEntriesSearch() {
+  state.entriesSearch = { text: '', from: '', to: '', amountOp: '', amount1: '', amount2: '' };
+  setEntriesFilter('all', '');
 }
 
 function renderTransactionItem(t) {
@@ -1450,7 +1500,8 @@ function changeEntriesMonth(months) {
 
 function loadMoreTransactions() {
   state.transactionsToShow += 30;
-  renderEntriesContent();
+  if (document.getElementById('all-entries-results')) renderAllEntriesResults();
+  else renderEntriesContent();
 }
 
 
