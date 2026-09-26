@@ -5608,7 +5608,7 @@ async function sendAskQuery() {
   const messagesDiv = document.getElementById('ai-chat-messages');
   
   // Add user message
-  messagesDiv.innerHTML += `<div class="ai-message user">${question}</div>`;
+  messagesDiv.innerHTML += `<div class="ai-message user">${escapeHTML(question)}</div>`;
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
   
   // Add loading indicator
@@ -5653,7 +5653,8 @@ async function sendAskQuery() {
     }
     
     // Replace loading with answer
-    document.getElementById(loadingId).innerHTML = answer.replace(/\n/g, '<br>');
+    // Escape first: the answer can include web-search content and must never run as HTML
+    document.getElementById(loadingId).innerHTML = escapeHTML(answer).replace(/\n/g, '<br>');
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
     
   } catch(err) {
