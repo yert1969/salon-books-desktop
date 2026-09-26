@@ -324,6 +324,34 @@ function closeModal() {
   document.getElementById('modal').classList.add('hidden');
 }
 
+// Resolves true if the user chooses to add the entry anyway
+function confirmDuplicateEntry(message) {
+  return new Promise(resolve => {
+    openModal(`
+      <h2 class="modal-title">⚠️ Possible Duplicate</h2>
+      <p style="margin-bottom:24px;color:var(--text);line-height:1.6;">${message}</p>
+      <div style="display:flex;gap:12px;">
+        <button class="btn-secondary" style="flex:1;" onclick="closeModal();window._dupeResolve(false)">Cancel</button>
+        <button class="btn-primary" style="flex:1;" onclick="closeModal();window._dupeResolve(true)">Yes, Add It</button>
+      </div>
+    `);
+    window._dupeResolve = resolve;
+  });
+}
+
+// An existing expense with the same category and amount dated within 3 days, if any
+async function findDuplicateExpense(category, amount, date) {
+  const threeDays = 3 * 24 * 60 * 60 * 1000;
+  const enteredMs = new Date(date + 'T12:00:00').getTime();
+  const all = await db.transactions.toArray();
+  return all.find(t =>
+    t.type === 'EXPENSE' &&
+    t.category === category &&
+    Math.abs((t.amount || 0) - amount) < 0.01 &&
+    Math.abs(new Date(t.date + 'T12:00:00').getTime() - enteredMs) <= threeDays
+  );
+}
+
 async function confirmDialog(message, title = 'Confirm') {
   return new Promise(resolve => {
     openModal(`
@@ -1644,8 +1672,17 @@ async function saveEntry() {
       record.employee = document.getElementById('entry-employee')?.value || 'Chasity McGill';
       record.payType = document.getElementById('entry-paytype')?.value || 'pay';
     }
+
+    // Duplicate check (same rule as mobile): same category and amount within 3 days
+    const dupe = await findDuplicateExpense(category, amount, date);
+    if (dupe) {
+      const ok = await confirmDuplicateEntry(
+        `You already have an entry on <strong>${formatDateShort(dupe.date)}</strong> for <strong>${escapeHTML(category)}</strong> — <strong>${fmt(dupe.amount)}</strong>.<br><br>Are you sure you want to add another?`
+      );
+      if (!ok) return;
+    }
   }
-  
+
   try {
     await db.transactions.add(record);
     showToast('Entry saved ✓');
