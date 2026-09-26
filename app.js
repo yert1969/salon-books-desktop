@@ -572,7 +572,9 @@ function getRateForWeek(renter, weekStart) {
   return rate;
 }
 
-function getRentStatus(weekStart, datePaid) {
+function getRentStatus(weekStart, datePaid, isVacation) {
+  // Rent-free vacation week: neither on-time, late nor unpaid (entered from mobile or desktop)
+  if (isVacation) return 'vacation';
   if (!datePaid) return 'unpaid';
   // Due date is Saturday (5 days after Monday week start)
   // "On time" = paid by Tuesday after due date (Saturday + 3 days = 8 days after Monday)
@@ -584,7 +586,8 @@ function getRentStatus(weekStart, datePaid) {
 
 async function updateRentersTabVisibility() {
   const override = await db.settings.get('showRentersTab');
-  if (override && override.value !== undefined) {
+  // Only 'true'/'false' are manual overrides; 'auto' or missing means auto-detect
+  if (override?.value === 'true' || override?.value === 'false') {
     state.showRentersTab = override.value === 'true';
   } else {
     const renters = await db.renters.toArray();
@@ -724,6 +727,7 @@ async function generateSmartInsights(allTxns, allRenters, allRentPmts) {
       ensureRateHistory(r);
       const rate = getRateForWeek(r, lastWS);
       const pmt = allRentPmts.find(p => p.renterId === r.id && p.weekStart === lastWS);
+      if (pmt?.vacation) return; // rent-free vacation week
       if (!pmt || pmt.amount < rate) {
         outstanding += rate - (pmt?.amount || 0);
         overdueCount++;
@@ -945,8 +949,9 @@ async function renderDashboard() {
   let rentExpected = 0;
   let rentCollected = 0;
   activeRenters.forEach(r => {
-    rentExpected += getRateForWeek(r, rentWeekStart);
     const pmt = allRentPmts.find(p => p.renterId === r.id && p.weekStart === rentWeekStart);
+    if (pmt?.vacation) return; // rent-free vacation week: nothing expected
+    rentExpected += getRateForWeek(r, rentWeekStart);
     if (pmt) rentCollected += pmt.amount || 0;
   });
   const rentOutstanding = Math.max(0, rentExpected - rentCollected);
@@ -1070,7 +1075,7 @@ async function renderDashboard() {
             <div style="font-size:14px;color:var(--text-muted);">of ${fmt(rentExpected)}</div>
           </div>
           <div style="height:8px;background:var(--cream);border-radius:4px;overflow:hidden;margin-bottom:12px;">
-            <div style="height:100%;background:var(--success);width:${Math.min(100, Math.round((rentCollected/rentExpected)*100))}%;border-radius:4px;"></div>
+            <div style="height:100%;background:var(--success);width:${rentExpected > 0 ? Math.min(100, Math.round((rentCollected/rentExpected)*100)) : 100}%;border-radius:4px;"></div>
           </div>
           <div style="font-size:14px;font-weight:600;color:${rentOutstanding > 0 ? 'var(--danger)' : 'var(--success)'};">
             ${rentOutstanding > 0 ? `${fmt(rentOutstanding)} outstanding` : '✓ All collected'}
@@ -2001,11 +2006,12 @@ async function renderRentersView() {
   let weekExpected = 0;
   let weekCollected = 0;
   let paidCount = 0;
-  
+  let vacationCount = 0;
+
   activeRenters.forEach(r => {
-    const rate = getRateForWeek(r, weekStart);
-    weekExpected += rate;
     const pmt = allPayments.find(p => p.renterId === r.id && p.weekStart === weekStart);
+    if (pmt?.vacation) { vacationCount++; return; } // rent-free week: nothing expected
+    weekExpected += getRateForWeek(r, weekStart);
     if (pmt) {
       weekCollected += pmt.amount || 0;
       paidCount++;
@@ -2041,7 +2047,7 @@ async function renderRentersView() {
       </div>
       <div class="renter-stat">
         <div class="renter-stat-label">Paid</div>
-        <div class="renter-stat-value">${paidCount} / ${activeRenters.length}</div>
+        <div class="renter-stat-value">${paidCount} / ${activeRenters.length - vacationCount}</div>
       </div>
     </div>
     
@@ -2063,18 +2069,19 @@ async function renderRentersView() {
       const rate = getRateForWeek(r, weekStart);
       const pmt = allPayments.find(p => p.renterId === r.id && p.weekStart === weekStart);
       const isPaid = !!pmt;
-      const status = isPaid ? getRentStatus(weekStart, pmt.datePaid) : 'unpaid';
-      
+      const status = isPaid ? getRentStatus(weekStart, pmt.datePaid, pmt.vacation) : 'unpaid';
+      const statusLabel = { vacation: '🌴 Vacation', ontime: '✓ Paid', late: '⚠ Late', unpaid: 'Unpaid' }[status];
+
       html += `
         <div class="renter-card" onclick="openRenterDetail('${r.id}')">
           <div class="renter-card-header">
             <div class="renter-avatar">👤</div>
             <div class="renter-info">
-              <div class="renter-name">${r.name}</div>
-              <div class="renter-booth">${r.booth ? 'Booth ' + r.booth : ''}</div>
+              <div class="renter-name">${escapeHTML(r.name)}</div>
+              <div class="renter-booth">${r.booth ? 'Booth ' + escapeHTML(r.booth) : ''}</div>
             </div>
             <div class="renter-status ${isPaid ? 'paid' : 'unpaid'}">
-              ${isPaid ? (status === 'ontime' ? '✓ Paid' : '⚠ Late') : 'Unpaid'}
+              ${statusLabel}
             </div>
           </div>
           <div class="renter-card-body">
@@ -2086,6 +2093,11 @@ async function renderRentersView() {
               <button class="btn-primary" style="padding:10px 20px;" onclick="event.stopPropagation();openLogPaymentModal('${r.id}')">
                 Log Payment
               </button>
+            ` : pmt.vacation ? `
+              <div style="text-align:right;">
+                <div style="font-size:13px;color:var(--text-muted);">Rent-free week</div>
+                <button class="btn-secondary" style="padding:4px 10px;font-size:12px;margin-top:4px;" onclick="event.stopPropagation();openLogPaymentModal('${r.id}')">Change</button>
+              </div>
             ` : `
               <div style="text-align:right;">
                 <div style="font-size:14px;color:var(--success);font-weight:600;">${fmt(pmt.amount)}</div>
@@ -2172,23 +2184,34 @@ async function saveNewRenter() {
   }
 }
 
-function openLogPaymentModal(renterId) {
+async function openLogPaymentModal(renterId) {
   const weekStart = state.rentersWeekStart || getWeekStart(todayStr());
-  
+  const renter = await db.renters.get(renterId);
+  ensureRateHistory(renter);
+  const weekRate = getRateForWeek(renter, weekStart);
+
   openModal(`
     <h2 class="modal-title">Log Rent Payment</h2>
     <p style="color:var(--text-muted);margin-bottom:20px;">Week of ${formatWeekRange(weekStart)}</p>
-    
+
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="payment-vacation" onchange="togglePaymentVacationFields()">
+        <span>🌴 Rent-free vacation week</span>
+      </label>
+    </div>
+
+    <div id="payment-fields">
     <div class="form-group">
       <label class="form-label">Amount ($)</label>
-      <input type="number" class="form-input" id="payment-amount" value="140" step="0.01">
+      <input type="number" class="form-input" id="payment-amount" value="${weekRate}" step="0.01">
     </div>
-    
+
     <div class="form-group">
       <label class="form-label">Date Paid</label>
       <input type="date" class="form-input" id="payment-date" value="${todayStr()}">
     </div>
-    
+
     <div class="form-group">
       <label class="form-label">Payment Method</label>
       <select class="form-select" id="payment-method">
@@ -2199,22 +2222,43 @@ function openLogPaymentModal(renterId) {
         <option value="Other">Other</option>
       </select>
     </div>
-    
+    </div>
+
     <div class="form-group">
       <label class="form-label">Notes</label>
       <input type="text" class="form-input" id="payment-notes" placeholder="Any notes...">
     </div>
-    
+
     <button class="btn-primary" style="width:100%;margin-top:16px;" onclick="saveRentPayment('${renterId}', '${weekStart}')">Save Payment</button>
   `);
 }
 
+function togglePaymentVacationFields() {
+  const on = document.getElementById('payment-vacation').checked;
+  document.getElementById('payment-fields').style.display = on ? 'none' : '';
+}
+
 async function saveRentPayment(renterId, weekStart) {
+  const isVacation = document.getElementById('payment-vacation')?.checked;
   const amount = parseFloat(document.getElementById('payment-amount').value) || 0;
   const datePaid = document.getElementById('payment-date').value;
   const method = document.getElementById('payment-method').value;
   const notes = document.getElementById('payment-notes').value.trim();
-  
+
+  const existing = await db.rentPayments.where('renterId').equals(renterId)
+    .filter(p => p.weekStart === weekStart).first();
+
+  // Rent-free vacation week: same record shape mobile uses
+  if (isVacation) {
+    const vac = { amount: 0, datePaid: todayStr(), paymentMethod: 'Vacation', vacation: true, notes };
+    if (existing) await db.rentPayments.update(existing.id, vac);
+    else await db.rentPayments.add({ renterId, weekStart, ...vac });
+    closeModal();
+    showToast('Marked as rent-free vacation week 🌴');
+    await renderRentersView();
+    return;
+  }
+
   if (amount <= 0) { showToast('Please enter an amount'); return; }
   
   // Get renter and their weekly rate
@@ -2228,12 +2272,8 @@ async function saveRentPayment(renterId, weekStart) {
     return;
   }
   
-  // Check for existing payment
-  const existing = await db.rentPayments.where('renterId').equals(renterId)
-    .filter(p => p.weekStart === weekStart).first();
-  
   if (existing) {
-    await db.rentPayments.update(existing.id, { amount, datePaid, paymentMethod: method, notes });
+    await db.rentPayments.update(existing.id, { amount, datePaid, paymentMethod: method, notes, vacation: false });
   } else {
     await db.rentPayments.add({
       renterId,
@@ -2264,7 +2304,8 @@ async function openCatchUpModal(renterId, totalAmount, datePaid, method, notes) 
     
     const rate = getRateForWeek(r, weekStart);
     const existingPmt = allPmts.find(p => p.weekStart === weekStart);
-    
+    if (existingPmt?.vacation) continue; // rent-free week: nothing owed
+
     if (!existingPmt) {
       unpaidWeeks.push({ weekStart, rate, amountDue: rate, paid: 0, status: 'unpaid' });
     } else if (existingPmt.amount < rate - 0.01) {
@@ -2460,10 +2501,14 @@ async function openRenterDetail(renterId, histYear) {
   weeks.reverse(); // newest first
 
   // Stats
-  let totalExpected = 0, totalPaid = 0, onTimeCount = 0, lateCount = 0, missedCount = 0;
+  // The current week's rent isn't due yet: only count it once paid
+  const currentWS = getWeekStart(todayStr());
+  let totalExpected = 0, totalPaid = 0, onTimeCount = 0, lateCount = 0, missedCount = 0, vacationCount = 0;
   weeks.forEach(ws => {
     const rate = getRateForWeek(r, ws);
     const p = payByWeek[ws];
+    if (p?.vacation) { vacationCount++; return; } // excused: not expected, not in on-time math
+    if (!p && ws >= currentWS) return;
     totalExpected += rate;
     if (p) {
       totalPaid += p.amount;
@@ -2487,6 +2532,20 @@ async function openRenterDetail(renterId, histYear) {
   const rows = weeks.map(ws => {
     const rate = getRateForWeek(r, ws);
     const p    = payByWeek[ws];
+    if (p?.vacation) {
+      const noteStr = p.notes ? ` · ${escapeHTML(p.notes)}` : '';
+      return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-light);">
+        <div style="font-size:17px;width:22px;text-align:center;">🌴</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:500;font-size:14px;">${formatWeekRange(ws)}</div>
+          <div style="font-size:12px;color:var(--text-muted);">Rent-free vacation week${noteStr}</div>
+        </div>
+        <div style="text-align:right;white-space:nowrap;">
+          <div style="font-weight:600;color:var(--text-muted);">$0</div>
+          <div style="font-size:11px;color:var(--text-muted);">Excused</div>
+        </div>
+      </div>`;
+    }
     if (p) {
       const status  = getRentStatus(ws, p.datePaid);
       const isShort = p.amount < rate * 0.99;
@@ -2494,7 +2553,7 @@ async function openRenterDetail(renterId, histYear) {
       const sColor  = status === 'ontime' ? 'var(--success)' : '#e07b39';
       const aColor  = isShort ? '#e07b39' : 'var(--success)';
       const shortNote = isShort ? `<span style="font-size:10px;color:#e07b39;margin-left:4px;">(short ${fmt(rate - p.amount)})</span>` : '';
-      const noteStr = p.notes ? ` · ${p.notes}` : '';
+      const noteStr = p.notes ? ` · ${escapeHTML(p.notes)}` : '';
       return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-light);">
         <div style="font-size:17px;width:22px;text-align:center;">${icon}</div>
         <div style="flex:1;min-width:0;">
@@ -2504,6 +2563,18 @@ async function openRenterDetail(renterId, histYear) {
         <div style="text-align:right;white-space:nowrap;">
           <div style="font-weight:600;color:${aColor};">${fmt(p.amount)}${shortNote}</div>
           <div style="font-size:11px;color:${sColor};">${status === 'ontime' ? 'On Time' : 'Late'}</div>
+        </div>
+      </div>`;
+    } else if (ws >= currentWS) {
+      return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-light);">
+        <div style="font-size:17px;width:22px;text-align:center;">⏳</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:500;font-size:14px;">${formatWeekRange(ws)}</div>
+          <div style="font-size:12px;color:var(--text-muted);">Due ${formatDateShort(addDays(ws, 5))}</div>
+        </div>
+        <div style="text-align:right;white-space:nowrap;">
+          <div style="font-weight:600;color:var(--text-muted);">${fmt(rate)}</div>
+          <div style="font-size:11px;color:var(--text-muted);">Not due yet</div>
         </div>
       </div>`;
     } else {
@@ -2522,9 +2593,9 @@ async function openRenterDetail(renterId, histYear) {
   }).join('');
 
   openModal(`
-    <h2 class="modal-title">${r.name}</h2>
+    <h2 class="modal-title">${escapeHTML(r.name)}</h2>
     <div style="display:flex;gap:16px;margin-bottom:16px;color:var(--text-muted);font-size:14px;flex-wrap:wrap;">
-      ${r.booth ? `<span>Booth ${r.booth}</span>` : ''}
+      ${r.booth ? `<span>Booth ${escapeHTML(r.booth)}</span>` : ''}
       <span>${fmt(curRate)}/week</span>
       <span>Since ${r.startDate ? formatDateShort(r.startDate) : 'N/A'}</span>
     </div>
@@ -2556,7 +2627,7 @@ async function openRenterDetail(renterId, histYear) {
     </div>
 
     <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:10px;">
-      ${selectedYear} · ${weeks.length} weeks · ${missedCount} missing
+      ${selectedYear} · ${weeks.length} weeks · ${missedCount} missing${vacationCount ? ` · ${vacationCount} vacation` : ''}
     </div>
     <div style="max-height:380px;overflow-y:auto;padding-right:4px;">
       ${rows || '<p style="color:var(--text-muted);text-align:center;padding:20px;">No weeks in this period</p>'}
@@ -3481,7 +3552,9 @@ async function renderBoothRentReport(output, controls) {
   // Build per-renter stats
   const renterStats = allRenters.map(r => {
     ensureRateHistory(r);
-    const pmts = yearPayments.filter(p => p.renterId === r.id);
+    // Rent-free vacation weeks are excused: excluded from payments, on-time math and expected rent
+    const vacationWeeks = new Set(allPayments.filter(p => p.renterId === r.id && p.vacation).map(p => p.weekStart));
+    const pmts = yearPayments.filter(p => p.renterId === r.id && !p.vacation);
     const totalPaid = pmts.reduce((s, p) => s + (p.amount || 0), 0);
     const onTime = pmts.filter(p => getRentStatus(p.weekStart, p.datePaid) === 'ontime').length;
     const late = pmts.filter(p => getRentStatus(p.weekStart, p.datePaid) === 'late').length;
@@ -3521,7 +3594,7 @@ async function renderBoothRentReport(output, controls) {
     let expectedAmt = 0;
     let cursor = getWeekStart(rangeStart);
     while (cursor <= rangeEnd) {
-      expectedAmt += getRateForWeek(r, cursor);
+      if (!vacationWeeks.has(cursor)) expectedAmt += getRateForWeek(r, cursor);
       cursor = addDays(cursor, 7);
     }
     const outstanding = Math.max(0, expectedAmt - totalPaid);
@@ -5782,13 +5855,16 @@ async function buildBusinessSnapshot() {
   // Booth renters with payment history
   const activeRenters = renters.filter(r => r.status === 'active');
   const renterDetails = activeRenters.map(r => {
-    const pmts = rentPmts.filter(p => p.renterId === r.id).sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+    const allPmts = rentPmts.filter(p => p.renterId === r.id);
+    const pmts = allPmts.filter(p => !p.vacation).sort((a, b) => b.weekStart.localeCompare(a.weekStart));
     const totalPaid = pmts.reduce((s, p) => s + (p.amount || 0), 0);
-    
-    // Check last 8 weeks for on-time pattern
-    let onTime = 0, late = 0, missed = 0;
-    for (let i = 0; i < 8; i++) {
+
+    // Last 8 completed weeks (the current week isn't due yet)
+    let onTime = 0, late = 0, missed = 0, vacation = 0;
+    for (let i = 1; i <= 8; i++) {
       const ws = addDays(getWeekStart(todayStr()), -(i * 7));
+      if (r.startDate && ws < getWeekStart(r.startDate)) break;
+      if (allPmts.some(p => p.weekStart === ws && p.vacation)) { vacation++; continue; }
       const pmt = pmts.find(p => p.weekStart === ws);
       if (pmt) {
         const status = getRentStatus(ws, pmt.datePaid);
@@ -5804,7 +5880,7 @@ async function buildBusinessSnapshot() {
       weeklyRate: getCurrentRate(r),
       totalPayments: pmts.length,
       totalPaid: Math.round(totalPaid),
-      last8Weeks: { onTime, late, missed }
+      last8Weeks: { onTime, late, missed, vacation }
     };
   });
   
@@ -5896,7 +5972,7 @@ TOP CLIENTS (by total spend) (Client and renter names are shown as initials for 
 ${topClients.map(c => `${alias(c.name)}: ${c.visits} visits, $${c.totalSpend} total, $${c.tips} tips ($${c.avgTip} avg tip), last visit ${c.lastVisit}`).join('\n')}
 
 BOOTH RENTERS (${activeRenters.length} active):
-${renterDetails.map(r => `${alias(r.name)}: $${r.weeklyRate}/week, ${r.totalPayments} payments ($${r.totalPaid} total), last 8 weeks: ${r.last8Weeks.onTime} on-time, ${r.last8Weeks.late} late, ${r.last8Weeks.missed} missed`).join('\n') || 'None'}
+${renterDetails.map(r => `${alias(r.name)}: $${r.weeklyRate}/week, ${r.totalPayments} payments ($${r.totalPaid} total), last 8 weeks: ${r.last8Weeks.onTime} on-time, ${r.last8Weeks.late} late, ${r.last8Weeks.missed} missed${r.last8Weeks.vacation ? `, ${r.last8Weeks.vacation} rent-free vacation (excused)` : ''}`).join('\n') || 'None'}
 `.trim();
 
   return snapshot;
