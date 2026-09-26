@@ -4310,7 +4310,6 @@ async function renderSettingsView() {
   const content = document.getElementById('app-content');
   
   const businessName = (await db.settings.get('businessName'))?.value || 'My Salon';
-  const pinEnabled = (await db.settings.get('pinLock'))?.value === 'true';
   const showRentersVal = (await db.settings.get('showRentersTab'))?.value;
   
   content.innerHTML = `
@@ -4320,7 +4319,6 @@ async function renderSettingsView() {
         <button class="settings-nav-item" onclick="showSettingsSection('categories')">Categories</button>
         <button class="settings-nav-item" onclick="showSettingsSection('employees')">Employees</button>
         <button class="settings-nav-item" onclick="showSettingsSection('vagaro')">Vagaro Import</button>
-        <button class="settings-nav-item" onclick="showSettingsSection('security')">Security</button>
         <button class="settings-nav-item" onclick="showSettingsSection('data')">Data & Backup</button>
         <button class="settings-nav-item" onclick="showSettingsSection('usage')">API Usage</button>
       </div>
@@ -4376,8 +4374,6 @@ function showSettingsSection(section) {
     renderEmployeesSettings(container);
   } else if (section === 'vagaro') {
     renderVagaroImportSettings(container);
-  } else if (section === 'security') {
-    renderSecuritySettings(container);
   } else if (section === 'data') {
     renderDataSettings(container);
   } else if (section === 'usage') {
@@ -4540,78 +4536,6 @@ async function deleteCategory(type, index) {
   await saveCategories();
   showSettingsSection('categories');
   showToast('Category deleted');
-}
-
-async function renderSecuritySettings(container) {
-  const pinEnabled = (await db.settings.get('pinLock'))?.value === 'true';
-  
-  container.innerHTML = `
-    <div class="settings-section">
-      <div class="settings-section-title">Security</div>
-      
-      <div class="settings-item">
-        <div>
-          <div class="settings-item-label">PIN Lock</div>
-          <div class="settings-item-sub">Require PIN to access the app</div>
-        </div>
-        <label class="toggle">
-          <input type="checkbox" ${pinEnabled ? 'checked' : ''} onchange="togglePinLock(this.checked)">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-      
-      ${pinEnabled ? `
-        <button class="btn-secondary" style="margin-top:16px;" onclick="openChangePinModal()">Change PIN</button>
-      ` : ''}
-    </div>
-  `;
-}
-
-async function togglePinLock(enabled) {
-  if (enabled) {
-    openSetPinModal();
-  } else {
-    await db.settings.delete('pinLock');
-    await db.settings.delete('pinCode');
-    showToast('PIN lock disabled');
-    showSettingsSection('security');
-  }
-}
-
-function openSetPinModal() {
-  openModal(`
-    <h2 class="modal-title">Set PIN</h2>
-    <p style="color:var(--text-muted);margin-bottom:20px;">Enter a 4-digit PIN</p>
-    
-    <div class="form-group">
-      <input type="password" class="form-input" id="new-pin" maxlength="4" pattern="[0-9]{4}" placeholder="Enter PIN" style="text-align:center;font-size:24px;letter-spacing:8px;">
-    </div>
-    <div class="form-group">
-      <input type="password" class="form-input" id="confirm-pin" maxlength="4" pattern="[0-9]{4}" placeholder="Confirm PIN" style="text-align:center;font-size:24px;letter-spacing:8px;">
-    </div>
-    
-    <button class="btn-primary" style="width:100%;margin-top:16px;" onclick="saveNewPin()">Set PIN</button>
-  `);
-}
-
-async function saveNewPin() {
-  const pin = document.getElementById('new-pin').value;
-  const confirm = document.getElementById('confirm-pin').value;
-  
-  if (!/^\d{4}$/.test(pin)) {
-    showToast('PIN must be 4 digits');
-    return;
-  }
-  if (pin !== confirm) {
-    showToast('PINs do not match');
-    return;
-  }
-  
-  await db.settings.put({ key: 'pinLock', value: 'true' });
-  await db.settings.put({ key: 'pinCode', value: pin });
-  closeModal();
-  showToast('PIN set successfully');
-  showSettingsSection('security');
 }
 
 async function renderDataSettings(container) {
@@ -5946,55 +5870,6 @@ ${renterDetails.map(r => `${r.name}: $${r.weeklyRate}/week, ${r.totalPayments} p
 }
 
 // ----------------------------------------------------------------
-// 19. PIN SCREEN LOGIC
-// ----------------------------------------------------------------
-
-let _pinEntry = '';
-
-function setupPinPad() {
-  document.querySelectorAll('.pin-btn[data-num]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (_pinEntry.length >= 4) return;
-      _pinEntry += btn.dataset.num;
-      updatePinDots();
-      if (_pinEntry.length === 4) {
-        checkPin();
-      }
-    });
-  });
-  
-  document.getElementById('pin-back').addEventListener('click', () => {
-    _pinEntry = _pinEntry.slice(0, -1);
-    updatePinDots();
-    document.getElementById('pin-error').classList.add('hidden');
-  });
-}
-
-function updatePinDots() {
-  for (let i = 0; i < 4; i++) {
-    document.getElementById(`dot-${i}`).classList.toggle('filled', i < _pinEntry.length);
-  }
-}
-
-async function checkPin() {
-  const stored = (await db.settings.get('pinCode'))?.value;
-  if (_pinEntry === stored) {
-    document.getElementById('pin-screen').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
-    await bootApp();
-  } else {
-    document.getElementById('pin-error').classList.remove('hidden');
-    _pinEntry = '';
-    updatePinDots();
-    // Shake animation
-    document.querySelector('.pin-dots').style.animation = 'shake 0.3s';
-    setTimeout(() => {
-      document.querySelector('.pin-dots').style.animation = '';
-    }, 300);
-  }
-}
-
-// ----------------------------------------------------------------
 // 20. APP BOOT
 // ----------------------------------------------------------------
 
@@ -6196,24 +6071,17 @@ function drawPieChart(canvasId, labels, values) {
 auth.onAuthStateChanged(async (user) => {
   if (user) {
     currentUser = user;
-    
-    // Check for PIN lock
-    const pinEnabled = (await db.settings.get('pinLock'))?.value === 'true';
-    
+
+    // PIN lock was removed; clear any PIN left in settings by either app
+    ['pinLock', 'pinCode', 'pin', 'pinEnabled'].forEach(k => db.settings.delete(k).catch(() => {}));
+
     document.getElementById('login-screen').classList.add('hidden');
-    
-    if (pinEnabled) {
-      document.getElementById('pin-screen').classList.remove('hidden');
-      setupPinPad();
-    } else {
-      document.getElementById('app').classList.remove('hidden');
-      await bootApp();
-    }
+    document.getElementById('app').classList.remove('hidden');
+    await bootApp();
   } else {
     currentUser = null;
     _appBooted = false;
     document.getElementById('app').classList.add('hidden');
-    document.getElementById('pin-screen').classList.add('hidden');
     document.getElementById('login-screen').classList.remove('hidden');
   }
 });
